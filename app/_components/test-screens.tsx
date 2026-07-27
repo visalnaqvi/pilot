@@ -13,6 +13,7 @@ import { MathText, MathTextEditor } from './math-components'
 import { SearchPicker } from './search-picker'
 import type { MockTest, Question, QuestionBankItem, QuestionContent, QuestionFormat, TestQuestion } from './test-types'
 import type { ExamCatalogEntry } from '@/lib/exam-catalog'
+import { assignmentWindowStatus } from '@/lib/assignment-window'
 
 type DraftQuestion = { key: string;
 questionId?: string;
@@ -256,11 +257,13 @@ router.push('/tests') } catch (reason) { setMessage(reason instanceof Error ? re
 if (!canManage) return <section><h1 className="text-3xl font-black">Access denied</h1></section>;
 return <section className="mx-auto max-w-3xl"><Link href={`/tests/${id}`} className="text-sm font-bold text-indigo-600">← Back to test</Link><div className="mt-5 flex justify-between gap-4"><h1 className="text-4xl font-black">Edit mock test</h1><button disabled={deleting} onClick={softDelete} className="rounded-lg border border-rose-200 px-3 py-2 text-sm font-bold text-rose-700">Soft delete</button></div>{message && <p className="mt-4 text-rose-700">{message}</p>}<TestEditor testId={id} initialTest={test} /></section> }
 
-function useTest(id: string) { const [test, setTest] = useState<MockTest | null>(null);
+function useTest(id: string, enabled = true) { const [test, setTest] = useState<MockTest | null>(null);
 const [questions, setQuestions] = useState<Question[]>([]);
-const [loading, setLoading] = useState(true);
+const [loading, setLoading] = useState(enabled);
 const [error, setError] = useState('');
-useEffect(() => { getDoc(doc(db, 'tests', id)).then(async (result) => { if (!result.exists()) return;
+useEffect(() => { if (!enabled) { setTest(null); setQuestions([]); setError(''); setLoading(false); return }
+setLoading(true); setError('');
+getDoc(doc(db, 'tests', id)).then(async (result) => { if (!result.exists()) return;
 const loaded = { id: result.id, ...result.data() } as MockTest;
 setTest(loaded);
 if (loaded.questions) { setQuestions(loaded.questions);
@@ -268,7 +271,7 @@ return } const memberships = (await getDocs(collection(db, 'tests', id, 'questio
 const resolved = await Promise.all(memberships.map(async (membership) => { const source = await getDoc(doc(db, 'questions', membership.questionId));
 const content = source.exists() ? source.data() as QuestionBankItem : membership.snapshot;
 return content ? { prompt: content.prompt, options: content.options, correctAnswer: content.correctAnswer, promptImageUrl: content.promptImageUrl, optionImageUrls: content.optionImageUrls, format: content.format, marks: membership.marks } : null }));
-setQuestions(resolved.filter((question) => question !== null) as Question[]) }).catch((reason) => setError(reason.message)).finally(() => setLoading(false)) }, [id]);
+setQuestions(resolved.filter((question) => question !== null) as Question[]) }).catch((reason) => setError(reason.message)).finally(() => setLoading(false)) }, [enabled, id]);
 return { test, questions, loading, error } }
 type AssignmentWindow = { assignmentBatchId?: string; assignmentName?: string; linkedTaskId?: string; maxAttempts?: number; attemptsUsed?: number; startAt?: { toDate: () => Date }; endAt?: { toDate: () => Date }; deadline?: { toDate: () => Date } }
 function useAssignment(testId: string, userId?: string) { const [assignment, setAssignment] = useState<AssignmentWindow | null>(null);
@@ -285,9 +288,11 @@ return onSnapshot(query(collection(db, 'submissions'), where('testId', '==', tes
 setPrivateCount(snapshot.docs.filter(item => item.data().testVisibility === 'private').length);
 setReady(true) }, () => setReady(true)) }, [testId, userId]);
 return { count, privateCount, ready } }
-export function TakeTest({ id }: { id: string }) { const { test, questions, loading, error } = useTest(id);
-const { user, profile, isImpersonating } = useAuth();
+export function TakeTest({ id }: { id: string }) { const { user, profile, isImpersonating } = useAuth();
 const { assignment, ready } = useAssignment(id, user?.uid);
+const windowStatus = assignment ? assignmentWindowStatus(assignment) : null;
+const shouldLoadTest = ready && (!assignment || windowStatus === 'open');
+const { test, questions, loading, error } = useTest(id, shouldLoadTest);
 const { count: previousAttempts, privateCount: previousPrivateAttempts, ready: attemptsReady } = useAttemptCount(id, user?.uid);
 const router = useRouter();
 const [answers, setAnswers] = useState<Record<number, number>>({});
@@ -299,18 +304,20 @@ const [fullscreenError, setFullscreenError] = useState('');
 const [securityViolation, setSecurityViolation] = useState(false);
 const allowedFullscreenExit = useRef(false);
 const pendingAutoSubmitReason = useRef<'time_expired' | 'fullscreen_exited' | null>(null);
-if (loading || !ready || !attemptsReady) return <p className="text-slate-500">Loading test…</p>;
+if (!ready) return <p className="text-slate-500">Loading test…</p>;
 if (!user) return <p className="text-slate-500">Loading your test session…</p>;
-if (!test) return <section><h1 className="text-3xl font-black">Test unavailable</h1><p>{error || 'This test does not exist or you do not have access to it.'}</p></section>;
 if (isImpersonating) return <TestAccessBlocked title="View-only impersonation" message="Exit impersonation before starting or submitting a test." />;
+const assignmentStart = assignment?.startAt?.toDate();
+const assignmentEnd = assignment?.endAt?.toDate() || assignment?.deadline?.toDate();
+if (assignment && windowStatus === 'not_started') return <section className="mx-auto max-w-2xl"><h1 className="text-3xl font-black">This assignment has not started</h1><p className="mt-3 text-slate-600">You can access it from <b className="text-slate-900">{assignmentStart?.toLocaleString()}</b>.</p><Link href="/tests" className="mt-6 inline-block text-sm font-bold text-indigo-600">← Back to tests</Link></section>;
+if (assignment && windowStatus === 'ended') return <section className="mx-auto max-w-2xl"><h1 className="text-3xl font-black">This assignment has ended</h1><p className="mt-3 text-slate-600">The access window closed on <b className="text-slate-900">{assignmentEnd?.toLocaleString()}</b>.</p><Link href="/tests" className="mt-6 inline-block text-sm font-bold text-indigo-600">← Back to tests</Link></section>;
+if (assignment && windowStatus === 'attempts_exhausted') return <TestAccessBlocked title="Assignment attempt limit reached" message={`You have used all ${assignment.maxAttempts || 1} attempt${(assignment.maxAttempts || 1) === 1 ? '' : 's'} allowed for this assignment.`} />;
+if (assignment && windowStatus === 'invalid') return <TestAccessBlocked title="Assignment unavailable" message="This assignment does not have a valid access window. Contact your institute." />;
+if (loading || !attemptsReady) return <p className="text-slate-500">Loading test…</p>;
+if (!test) return <section><h1 className="text-3xl font-black">Test unavailable</h1><p>{error || 'This test does not exist or you do not have access to it.'}</p></section>;
 const isAssignedTest = test.visibility === 'assigned';
 const requiresSecureMode = test.visibility !== 'public';
-const assignmentStart = isAssignedTest ? assignment?.startAt?.toDate() : undefined;
-const assignmentEnd = isAssignedTest ? assignment?.endAt?.toDate() || assignment?.deadline?.toDate() : undefined;
 if (isAssignedTest && !assignment) return <TestAccessBlocked title="Assignment required" message="This test can only be opened from an assignment created for you." />;
-if (assignmentStart && assignmentStart > new Date()) return <section className="mx-auto max-w-2xl"><h1 className="text-3xl font-black">This assignment has not started</h1><p className="mt-3 text-slate-600">You can access it from <b className="text-slate-900">{assignmentStart.toLocaleString()}</b>.</p><Link href="/tests" className="mt-6 inline-block text-sm font-bold text-indigo-600">← Back to tests</Link></section>;
-if (assignmentEnd && assignmentEnd < new Date()) return <section className="mx-auto max-w-2xl"><h1 className="text-3xl font-black">This assignment has ended</h1><p className="mt-3 text-slate-600">The access window closed on <b className="text-slate-900">{assignmentEnd.toLocaleString()}</b>.</p><Link href="/tests" className="mt-6 inline-block text-sm font-bold text-indigo-600">← Back to tests</Link></section>;
-if (isAssignedTest && (assignment?.attemptsUsed || 0) >= (assignment?.maxAttempts || 1)) return <TestAccessBlocked title="Assignment attempt limit reached" message={`You have used all ${assignment?.maxAttempts || 1} attempt${(assignment?.maxAttempts || 1) === 1 ? '' : 's'} allowed for this assignment.`} />;
 const assignmentUserName = profile?.name || user.displayName || profile?.email || user.email || 'User';
 const markAssignmentTaskStarted = async () => {
   if (!assignment?.linkedTaskId) return
