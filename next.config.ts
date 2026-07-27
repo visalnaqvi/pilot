@@ -1,6 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Firebase Admin 14 reaches ESM-only jose through CommonJS jwks-rsa.
+  transpilePackages: ['firebase-admin'],
   images: {
     remotePatterns: [
       {
