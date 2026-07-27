@@ -1,0 +1,71 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() { return request.auth != null; }
+    function canCreateTests() {
+      return signedIn() && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role in ['admin', 'organisation'];
+    }
+    function isOrganisation() {
+      return signedIn() && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role == 'organisation';
+    }
+    function isAdmin() {
+      return signedIn() && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+    function canReadTask(taskId) {
+      let task = firestore.get(/databases/(default)/documents/tasks/$(taskId)).data;
+      return signedIn() && (isAdmin() || (isOrganisation() && task.organisationId == request.auth.uid)
+        || request.auth.uid in task.assignedUserIds);
+    }
+    function taskUserWindowOpen(taskId) {
+      let task = firestore.get(/databases/(default)/documents/tasks/$(taskId)).data;
+      return (!('startAt' in task) || task.startAt == null || task.startAt <= request.time)
+        && (!('endAt' in task) || task.endAt == null || task.endAt > request.time);
+    }
+
+    match /question-images/{userId}/{allPaths=**} {
+      allow read: if signedIn();
+      allow write: if canCreateTests() && request.auth.uid == userId && request.resource.size < 5 * 1024 * 1024 && request.resource.contentType.matches('image/.*');
+    }
+
+    match /organisation-profiles/{organisationId}/{imageName} {
+      allow read: if signedIn();
+      allow create, update: if isOrganisation()
+        && request.auth.uid == organisationId
+        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+      allow delete: if isOrganisation() && request.auth.uid == organisationId;
+    }
+
+    match /task-attachments/{organisationId}/{taskId}/{allPaths=**} {
+      allow read: if canReadTask(taskId);
+      allow create: if isOrganisation()
+        && request.auth.uid == organisationId
+        && request.resource.size <= 20 * 1024 * 1024;
+      allow delete: if isOrganisation() && request.auth.uid == organisationId;
+      allow update: if false;
+    }
+
+    match /task-submissions/{organisationId}/{taskId}/{userId}/{allPaths=**} {
+      allow read: if signedIn()
+        && (isAdmin() || (isOrganisation()
+            && firestore.get(/databases/(default)/documents/tasks/$(taskId)).data.organisationId == request.auth.uid)
+          || (request.auth.uid == userId
+            && request.auth.uid in firestore.get(/databases/(default)/documents/tasks/$(taskId)).data.assignedUserIds));
+      allow create: if signedIn()
+        && request.auth.uid == userId
+        && firestore.get(/databases/(default)/documents/tasks/$(taskId)).data.organisationId == organisationId
+        && firestore.get(/databases/(default)/documents/tasks/$(taskId)).data.taskType == 'submission'
+        && firestore.get(/databases/(default)/documents/tasks/$(taskId)).data.isClosed == false
+        && taskUserWindowOpen(taskId)
+        && request.auth.uid in firestore.get(/databases/(default)/documents/tasks/$(taskId)).data.assignedUserIds
+        && request.resource.size <= 20 * 1024 * 1024;
+      allow delete: if (isOrganisation() && request.auth.uid == organisationId)
+        || (signedIn()
+          && request.auth.uid == userId
+          && !firestore.exists(/databases/(default)/documents/tasks/$(taskId)/submissions/$(userId)));
+      allow update: if false;
+    }
+
+  }
+}

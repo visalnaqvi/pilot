@@ -1,0 +1,278 @@
+@import "tailwindcss";
+@import "katex/dist/katex.min.css";
+@import "mathlive/static.css";
+@import "mathlive/fonts.css";
+
+:root { --background: #f8fafc; --foreground: #172033; }
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+/* Modal tables and cards use the same subtle divider treatment as the dashboard. */
+[role="dialog"] .border {
+  border-color: #e2e8f0;
+}
+
+button, input, textarea { font: inherit; }
+
+.organisation-profile-logo {
+  width: auto;
+  min-width: 6rem;
+  max-width: 12rem;
+  aspect-ratio: var(--logo-aspect, 1);
+  transition: width 180ms ease;
+}
+
+@media (min-width: 640px) {
+  .organisation-profile-logo {
+    min-width: 7rem;
+    max-width: 14rem;
+  }
+}
+
+.assignment-input {
+  width: 100%;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.75rem;
+  background: #fff;
+  padding: 0.75rem 0.875rem;
+  color: #172033;
+  outline: none;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.assignment-input::placeholder { color: #94a3b8; }
+.assignment-input:focus { border-color: #4f46e5; box-shadow: 0 0 0 3px rgb(79 70 229 / 12%); }
+
+.group-input {
+  width: 100%;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.75rem;
+  background: #fff;
+  padding: 0.75rem 0.875rem;
+  color: #172033;
+  outline: none;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.group-input::placeholder { color: #94a3b8; }
+.group-input:focus { border-color: #4f46e5; box-shadow: 0 0 0 3px rgb(79 70 229 / 12%); }
+
+/* Remove the decorative corner layer from the assignment form. */
+form > div[aria-hidden="true"].pointer-events-none { display: none !important; }
+
+.assignment-toggle {
+  margin-left: auto;
+  border-radius: 0.75rem;
+  background: #4f46e5;
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: #fff;
+  box-shadow: 0 8px 18px rgb(79 70 229 / 20%);
+}
+
+.assignment-calendar .fc {
+  --fc-border-color: #e2e8f0;
+  --fc-button-bg-color: #fff;
+  --fc-button-border-color: #cbd5e1;
+  --fc-button-text-color: #334155;
+  --fc-button-hover-bg-color: #f8fafc;
+  --fc-button-hover-border-color: #94a3b8;
+  --fc-button-active-bg-color: #4f46e5;
+  --fc-button-active-border-color: #4f46e5;
+  --fc-today-bg-color: #f3f1ff;
+  --fc-now-indicator-color: #f43f5e;
+  height: 100%;
+  color: #334155;
+}
+
+.assignment-calendar .fc .fc-toolbar {
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.assignment-calendar .fc .fc-toolbar-title {
+  color: #0f172a;
+  font-size: 1.05rem;
+  font-weight: 900;
+  letter-spacing: -0.01em;
+}
+
+.assignment-calendar .fc .fc-button {
+  border-radius: 0.6rem;
+  box-shadow: none;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.5rem 0.75rem;
+  text-transform: capitalize;
+}
+
+.assignment-calendar .fc .fc-button-group {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.65rem;
+  background: #fff;
+}
+
+.assignment-calendar .fc .fc-button-group .fc-button {
+  border: 0;
+  border-radius: 0;
+  min-width: 3.25rem;
+}
+
+.assignment-calendar .fc .fc-button-group .fc-button + .fc-button {
+  border-left: 1px solid #e2e8f0;
+}
+
+.assignment-calendar .fc .fc-button-group .fc-button-primary.fc-button-active,
+.assignment-calendar .fc .fc-button-group .fc-button-primary.fc-button-active:hover,
+.assignment-calendar .fc .fc-button-group .fc-button-primary.fc-button-active:focus,
+.assignment-calendar .fc .fc-button-group .fc-button-primary:active {
+  border-color: #4f46e5 !important;
+  background-color: #4f46e5 !important;
+  color: #fff !important;
+  -webkit-text-fill-color: #fff;
+}
+
+.assignment-calendar .fc .fc-button-primary:focus,
+.assignment-calendar .fc .fc-button-primary:not(:disabled).fc-button-active:focus {
+  box-shadow: none;
+  outline: none;
+}
+
+.assignment-calendar .fc .fc-prev-button,
+.assignment-calendar .fc .fc-next-button {
+  display: inline-grid;
+  height: 2.25rem;
+  width: 2.25rem;
+  place-items: center;
+  padding: 0;
+}
+
+.assignment-calendar .fc .fc-today-button {
+  border-color: #ede9fe;
+  background: #f5f3ff;
+  color: #6d28d9;
+  opacity: 1;
+}
+
+.assignment-calendar .fc .fc-scrollgrid {
+  border-radius: 0.75rem;
+  overflow: hidden;
+}
+
+.assignment-calendar .fc .fc-scroller {
+  scrollbar-color: #cbd5e1 transparent;
+  scrollbar-width: thin;
+}
+
+.assignment-calendar .fc .fc-col-header-cell {
+  background: #fff;
+}
+
+.assignment-calendar .fc .fc-col-header-cell-cushion,
+.assignment-calendar .fc .fc-daygrid-day-number {
+  color: #475569;
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 0.7rem 0.4rem;
+}
+
+.assignment-calendar .fc .fc-timegrid-slot-label-cushion {
+  color: #64748b;
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 0 0.65rem;
+}
+
+.assignment-calendar .fc .fc-timegrid-slot {
+  height: 1.7rem;
+}
+
+.assignment-calendar .fc .fc-timegrid-axis {
+  background: #fff;
+}
+
+.assignment-calendar .fc .fc-timegrid-now-indicator-arrow {
+  border-bottom-color: transparent;
+  border-top-color: transparent;
+  border-left-color: var(--fc-now-indicator-color);
+}
+
+.assignment-calendar .fc .fc-event {
+  border: 0;
+  border-radius: 0.5rem;
+  box-shadow: 0 5px 12px rgb(15 23 42 / 16%);
+  cursor: pointer;
+  padding: 0.15rem;
+}
+
+.assignment-calendar {
+  position: relative;
+  overflow: hidden;
+}
+
+.assignment-calendar .fc-view-harness {
+  min-height: 0;
+}
+
+.assignment-live-shimmer {
+  background-image: linear-gradient(
+    110deg,
+    transparent 20%,
+    rgb(255 255 255 / 75%) 45%,
+    transparent 70%
+  );
+  background-position: 180% 0;
+  background-repeat: no-repeat;
+  background-size: 220% 100%;
+  animation: assignment-live-shimmer 2.2s ease-in-out infinite;
+}
+
+@keyframes assignment-live-shimmer {
+  to {
+    background-position: -120% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .assignment-live-shimmer {
+    animation: none;
+  }
+}
+
+@media (max-width: 767px) {
+  .calendar-page {
+    height: calc(100dvh - 8.5rem);
+    min-height: 30rem;
+  }
+
+  .assignment-calendar .fc .fc-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .assignment-calendar .fc .fc-toolbar-chunk {
+    display: flex;
+    justify-content: center;
+  }
+
+  .assignment-calendar .fc .fc-toolbar-chunk:nth-child(2) {
+    order: -1;
+  }
+
+  .assignment-calendar .fc .fc-col-header-cell-cushion {
+    font-size: 0.65rem;
+  }
+}

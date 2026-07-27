@@ -1,0 +1,47 @@
+{
+  "name": "mock-test-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "email:poll": "tsx scripts/task-email-poller.ts",
+    "migrate:exam-catalog": "node scripts/migrate-exam-catalog.mjs",
+    "exam:refresh": "tsx scripts/exam-cli.ts",
+    "exam:cleanup-legacy": "tsx scripts/cleanup-legacy-exam-ingestion.ts",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fullcalendar/core": "^6.1.21",
+    "@fullcalendar/daygrid": "^6.1.21",
+    "@fullcalendar/interaction": "^6.1.21",
+    "@fullcalendar/react": "^6.1.21",
+    "@fullcalendar/timegrid": "^6.1.21",
+    "dotenv": "^17.4.2",
+    "echarts": "^6.1.0",
+    "echarts-for-react": "^3.0.6",
+    "firebase": "^12.16.0",
+    "firebase-admin": "^14.1.0",
+    "katex": "^0.17.0",
+    "mathlive": "^0.110.0",
+    "next": "16.2.10",
+    "openai": "^6.47.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "tsx": "^4.23.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.10",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
