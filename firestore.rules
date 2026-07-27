@@ -38,7 +38,7 @@ service cloud.firestore {
           || (test.visibility == 'private' && belongsToOrganisation(test.organisationId))
           || (test.visibility == 'assigned' && isOrganisation() && test.createdBy == request.auth.uid))));
     }
-    function canListTest(testId) {
+    function canListTest() {
       let test = resource.data;
       return signedIn() && ((test.deletedAt != null && (isAdmin() || (isOrganisation() && test.createdBy == request.auth.uid)))
         || (test.deletedAt == null && (isAdmin() || test.visibility == 'public'
@@ -64,15 +64,6 @@ service cloud.firestore {
       return canManageTest(testId)
         && get(/databases/$(database)/documents/tests/$(testId)).data.deletedAt == null
         && get(/databases/$(database)/documents/tests/$(testId)).data.visibility == 'assigned';
-    }
-    function assignmentWindowOpen(testId, assignmentBatchId, userId) {
-      let assignment = testAssignmentPath(assignmentBatchId, userId);
-      return exists(assignment)
-        && get(assignment).data.testId == testId
-        && get(assignment).data.assignmentBatchId == assignmentBatchId
-        && ((!('startAt' in get(assignment).data) || get(assignment).data.startAt <= request.time)
-        && get(assignment).data.deadline >= request.time
-        && get(assignment).data.attemptsUsed < get(assignment).data.maxAttempts);
     }
     function assignmentSubmissionWindowOpen(testId, assignmentBatchId, userId) {
       let assignment = testAssignmentPath(assignmentBatchId, userId);
@@ -396,7 +387,7 @@ service cloud.firestore {
       // Collection queries must be authorized from resource.data. Calling
       // get() on the candidate path prevents Firestore from proving that a
       // constrained query can only return allowed documents.
-      allow list: if canListTest(testId);
+      allow list: if canListTest();
       allow get: if canReadTestById(testId) && canOpenTest(testId);
       allow create: if canCreateTests() && hasExam(request.resource.data) && hasCategory(request.resource.data) && request.resource.data.published is bool && request.resource.data.createdBy == request.auth.uid && request.resource.data.deletedAt == null && request.resource.data.visibility in ['public', 'private', 'assigned'] && validTestAccessMode(request.resource.data);
       allow update: if canManageTest(testId) && (!('exam' in resource.data) || hasExam(request.resource.data)) && (!('category' in resource.data) || hasCategory(request.resource.data)) && (!('published' in resource.data) || request.resource.data.published is bool) && ((resource.data.deletedAt != null && request.resource.data.deletedAt == null && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deletedAt', 'deletedBy'])) || (resource.data.deletedAt == null && request.resource.data.createdBy == resource.data.createdBy && (request.resource.data.deletedAt == null || request.resource.data.deletedBy == request.auth.uid) && request.resource.data.visibility in ['public', 'private', 'assigned'] && validTestAccessMode(request.resource.data)));
