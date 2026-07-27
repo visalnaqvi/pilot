@@ -2,17 +2,20 @@ import { applicationDefault, cert, getApps, initializeApp } from 'firebase-admin
 import { getAuth } from 'firebase-admin/auth'
 import { getFirestore } from 'firebase-admin/firestore'
 import { getStorage } from 'firebase-admin/storage'
+import { normalizeFirebasePrivateKey } from './firebase-private-key'
 
 function adminApp() {
   if (getApps().length) return getApps()[0]
   const projectId = process.env.FIREBASE_ADMIN_PROJECT_ID
   const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL
-  const privateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY?.replace(/\\n/g, '\n')
+  const privateKey = normalizeFirebasePrivateKey(process.env.FIREBASE_ADMIN_PRIVATE_KEY)
   const configured = [projectId, clientEmail, privateKey].filter(Boolean).length
   if (configured && configured !== 3) throw new Error('Firebase Admin configuration is incomplete. Set FIREBASE_ADMIN_PROJECT_ID, FIREBASE_ADMIN_CLIENT_EMAIL, and FIREBASE_ADMIN_PRIVATE_KEY together.')
   const storageBucket = process.env.FIREBASE_STORAGE_BUCKET || (projectId ? `${projectId}.firebasestorage.app` : undefined)
   if (configured === 3) {
-    if (!privateKey!.includes('BEGIN PRIVATE KEY')) throw new Error('FIREBASE_ADMIN_PRIVATE_KEY must be the private_key from a Firebase service-account JSON key.')
+    if (!privateKey!.startsWith('-----BEGIN PRIVATE KEY-----') || !privateKey!.endsWith('-----END PRIVATE KEY-----')) {
+      throw new Error('FIREBASE_ADMIN_PRIVATE_KEY must contain the complete private_key from a Firebase service-account JSON key.')
+    }
     return initializeApp({
       credential: cert({ projectId: projectId!, clientEmail: clientEmail!, privateKey: privateKey! }),
       storageBucket,

@@ -6,7 +6,10 @@ const normalize = (value) => value.normalize('NFKD').replace(/[\u0300-\u036f]/g,
 const idFor = (name) => { const key = normalize(name); let hash = 2166136261; for (const char of key) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619); return `${key.replace(/\s+/g, '-').slice(0, 100)}-${(hash >>> 0).toString(36)}` }
 const projectId = process.env.FIREBASE_ADMIN_PROJECT_ID
 const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL
-const privateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY?.replace(/\\n/g, '\n')
+const rawPrivateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY?.trim()
+const quote = rawPrivateKey?.[0]
+const unquotedPrivateKey = rawPrivateKey && (quote === '"' || quote === "'") && rawPrivateKey.at(-1) === quote ? rawPrivateKey.slice(1, -1) : rawPrivateKey
+const privateKey = unquotedPrivateKey?.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\r/g, '\n').replace(/\r\n?/g, '\n').trim()
 if (!getApps().length) initializeApp({ credential: projectId && clientEmail && privateKey ? cert({ projectId, clientEmail, privateKey }) : applicationDefault() })
 const db = getFirestore()
 const write = process.argv.includes('--write')
