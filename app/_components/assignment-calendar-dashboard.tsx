@@ -1,17 +1,19 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import Link from 'next/link'
 import FullCalendar from '@fullcalendar/react'
 import dayGridPlugin from '@fullcalendar/daygrid'
 import timeGridPlugin from '@fullcalendar/timegrid'
 import interactionPlugin from '@fullcalendar/interaction'
 import { collection, getDocs, onSnapshot, query, where } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
+import { assignmentInstanceId } from '@/lib/assignment-instance'
 import { useAuth, type UserProfile } from './auth-context'
 import { AssignmentModal, type AssignmentBatch } from './assignments-dashboard'
 import type { Submission } from './test-types'
 
-type UserAssignment = { id: string; testId: string; testTitle: string; assignmentName?: string; attemptsUsed?: number; maxAttempts?: number; startAt?: { toDate: () => Date }; deadline: { toDate: () => Date }; createdAt?: { toDate: () => Date } }
+type UserAssignment = { id: string; assignmentBatchId?: string; testId: string; testTitle: string; assignmentName?: string; attemptsUsed?: number; maxAttempts?: number; startAt?: { toDate: () => Date }; deadline: { toDate: () => Date }; createdAt?: { toDate: () => Date } }
 type DateValue = { toDate: () => Date }
 type CalendarEventFilter = 'all' | 'assignments' | 'tasks'
 type CalendarTask = {
@@ -58,7 +60,12 @@ export function AssignmentCalendarDashboard() {
   }, [manager, user])
   useEffect(() => {
     if (!user || !learner) return
-    return onSnapshot(query(collection(db, 'testAssignments'), where('userId', '==', user.uid)), snapshot => setUserAssignments(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as UserAssignment)), reason => setMessage(reason.message))
+    void user.getIdToken().then(token => fetch('/api/test-session?list=assignments', {
+      headers: { authorization: `Bearer ${token}` },
+    })).catch(() => undefined)
+    return onSnapshot(query(collection(db, 'testAssignments'), where('userId', '==', user.uid)), snapshot => setUserAssignments(snapshot.docs
+      .map(item => ({ id: item.id, ...item.data() }) as UserAssignment)
+      .filter(item => !!item.assignmentBatchId && item.id === assignmentInstanceId(item.assignmentBatchId, user.uid))), reason => setMessage(reason.message))
   }, [learner, user])
   useEffect(() => {
     if (!user || (role !== 'organisation' && role !== 'user')) return
@@ -178,7 +185,8 @@ export function AssignmentCalendarDashboard() {
 
 function UserAssignmentModal({ assignment, close }: { assignment: UserAssignment; close: () => void }) {
   const state = stateOf(assignment)
-  return <div role="dialog" aria-modal="true" className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-4" onMouseDown={close}><section className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl" onMouseDown={event => event.stopPropagation()}><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-bold tracking-widest text-indigo-600">ASSIGNMENT DETAILS</p><h2 className="mt-2 text-2xl font-black">{assignment.assignmentName || assignment.testTitle}</h2><p className="mt-1 text-sm text-slate-600">{assignment.testTitle}</p></div><button type="button" onClick={close} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold">Close</button></div><dl className="mt-6 space-y-4 rounded-xl bg-slate-50 p-4 text-sm"><div><dt className="font-bold text-slate-500">Status</dt><dd className="mt-1 font-bold capitalize text-slate-900">{state}</dd></div><div><dt className="font-bold text-slate-500">Starts</dt><dd className="mt-1 text-slate-900">{(assignment.startAt?.toDate() || assignment.createdAt?.toDate())?.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</dd></div><div><dt className="font-bold text-slate-500">Ends</dt><dd className="mt-1 text-slate-900">{assignment.deadline.toDate().toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</dd></div><div><dt className="font-bold text-slate-500">Attempts</dt><dd className="mt-1 text-slate-900">{assignment.attemptsUsed || 0} of {assignment.maxAttempts || 1} used</dd></div></dl></section></div>
+  const attemptsExhausted = (assignment.attemptsUsed || 0) >= (assignment.maxAttempts || 1)
+  return <div role="dialog" aria-modal="true" className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-4" onMouseDown={close}><section className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl" onMouseDown={event => event.stopPropagation()}><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-bold tracking-widest text-indigo-600">ASSIGNMENT DETAILS</p><h2 className="mt-2 text-2xl font-black">{assignment.assignmentName || assignment.testTitle}</h2><p className="mt-1 text-sm text-slate-600">{assignment.testTitle}</p></div><button type="button" onClick={close} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold">Close</button></div><dl className="mt-6 space-y-4 rounded-xl bg-slate-50 p-4 text-sm"><div><dt className="font-bold text-slate-500">Status</dt><dd className="mt-1 font-bold capitalize text-slate-900">{state}</dd></div><div><dt className="font-bold text-slate-500">Starts</dt><dd className="mt-1 text-slate-900">{(assignment.startAt?.toDate() || assignment.createdAt?.toDate())?.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</dd></div><div><dt className="font-bold text-slate-500">Ends</dt><dd className="mt-1 text-slate-900">{assignment.deadline.toDate().toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</dd></div><div><dt className="font-bold text-slate-500">Attempts</dt><dd className="mt-1 text-slate-900">{assignment.attemptsUsed || 0} of {assignment.maxAttempts || 1} used</dd></div></dl>{state === 'live' && !attemptsExhausted && <Link href={`/tests/${assignment.testId}${assignment.assignmentBatchId ? `?assignment=${encodeURIComponent(assignment.assignmentBatchId)}` : ''}`} className="mt-5 block rounded-xl bg-indigo-600 px-4 py-3 text-center text-sm font-black text-white hover:bg-indigo-700">Start assignment</Link>}</section></div>
 }
 
 function TaskCalendarModal({ task, close }: { task: CalendarTask; close: () => void }) {

@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { collection, doc, getDoc, getDocs, onSnapshot, query, where } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
 import { isAssignmentWindowOpen } from '@/lib/assignment-window'
+import { assignmentInstanceId } from '@/lib/assignment-instance'
 import { useAuth, type UserProfile } from './auth-context'
 import { SearchPicker } from './search-picker'
 import { TestDashboardModal } from './exam-dashboard'
@@ -12,8 +13,8 @@ import { paginate, Pagination } from './pagination'
 import type { MockTest } from './test-types'
 
 type Invite = { organisationId: string; status: 'pending' | 'accepted' | 'declined' }
-type LibraryTest = MockTest & { assignmentAttemptsUsed?: number; assignmentMaxAttempts?: number; assignmentStartAt?: { toDate: () => Date }; assignmentDeadline?: { toDate: () => Date } }
-type UserAssignment = { testId: string; userId: string; attemptsUsed?: number; maxAttempts?: number; startAt?: { toDate: () => Date }; deadline: { toDate: () => Date } }
+type LibraryTest = MockTest & { assignmentBatchId?: string; assignmentName?: string; assignmentAttemptsUsed?: number; assignmentMaxAttempts?: number; assignmentStartAt?: { toDate: () => Date }; assignmentDeadline?: { toDate: () => Date } }
+type UserAssignment = { assignmentBatchId?: string; assignmentName?: string; testId: string; userId: string; attemptsUsed?: number; maxAttempts?: number; startAt?: { toDate: () => Date }; deadline: { toDate: () => Date } }
 
 const categoryName = (test: MockTest) => test.category?.trim() || 'Uncategorized'
 const createdAt = (test: MockTest) => test.createdAt?.toDate().getTime() || 0
@@ -171,9 +172,14 @@ export function TestLibrary() {
       return onSnapshot(query(collection(db, 'tests'), where('visibility', '==', 'assigned'), where('createdBy', '==', user.uid), where('deletedAt', '==', null)), snapshot => setAssignedTests(byNewest(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as LibraryTest))), reason => setError(reason.message))
     }
     if (role !== 'user') return
+    void user.getIdToken().then(token => fetch('/api/test-session?list=assignments', {
+      headers: { authorization: `Bearer ${token}` },
+    })).catch(() => undefined)
     return onSnapshot(
       query(collection(db, 'testAssignments'), where('userId', '==', user.uid)),
-      snapshot => setUserAssignments(snapshot.docs.map(item => item.data() as UserAssignment)),
+      snapshot => setUserAssignments(snapshot.docs
+        .map(item => ({ id: item.id, ...item.data() }) as UserAssignment & { id: string })
+        .filter(item => !!item.assignmentBatchId && item.id === assignmentInstanceId(item.assignmentBatchId, user.uid))),
       reason => setError(reason.message),
     )
   }, [role, user])
@@ -184,9 +190,17 @@ export function TestLibrary() {
     const openAssignments = userAssignments.filter(assignment => isAssignmentWindowOpen(assignment, now))
     Promise.all(openAssignments.map(async assignment => {
       try {
-        const result = await getDoc(doc(db, 'tests', assignment.testId))
-        if (!result.exists()) return null
-        return { id: result.id, ...result.data(), assignmentAttemptsUsed: assignment.attemptsUsed || 0, assignmentMaxAttempts: assignment.maxAttempts || 1, assignmentStartAt: assignment.startAt, assignmentDeadline: assignment.deadline } as LibraryTest
+        const queryString = new URLSearchParams({ testId: assignment.testId })
+        if (assignment.assignmentBatchId) queryString.set('assignment', assignment.assignmentBatchId)
+        const response = await fetch(`/api/test-session?${queryString}`, {
+          headers: { authorization: `Bearer ${await user.getIdToken()}` },
+        })
+        const payload = await response.json().catch(() => ({})) as { test?: MockTest; error?: string }
+        if (!response.ok || !payload.test) {
+          if (response.status === 403) return null
+          throw new Error(payload.error || 'Unable to load assigned test.')
+        }
+        return { ...payload.test, assignmentBatchId: assignment.assignmentBatchId, assignmentName: assignment.assignmentName, assignmentAttemptsUsed: assignment.attemptsUsed || 0, assignmentMaxAttempts: assignment.maxAttempts || 1, assignmentStartAt: assignment.startAt, assignmentDeadline: assignment.deadline } as LibraryTest
       } catch (reason) {
         if ((reason as { code?: string }).code === 'permission-denied') return null
         throw reason
@@ -274,7 +288,7 @@ export function TestLibrary() {
       {visibleTests.length > pageSize && <p className="text-sm text-slate-500">Page {pagedTests.page} of {pagedTests.totalPages}</p>}
     </div>
     <div className="mt-5 grid gap-5 md:grid-cols-2">
-      {loading ? <p className="text-slate-500">Loading tests…</p> : pagedTests.items.length ? pagedTests.items.map(test => <TestCard key={`${test.visibility}-${test.id}`} test={test} openTestDashboard={setOpenedTest} />) : <div className="rounded-2xl border-2 border-dashed border-slate-200 p-8 text-center text-slate-500 md:col-span-2">No tests match these filters.</div>}
+      {loading ? <p className="text-slate-500">Loading tests…</p> : pagedTests.items.length ? pagedTests.items.map(test => <TestCard key={`${test.visibility}-${test.id}-${test.assignmentBatchId || ''}`} test={test} openTestDashboard={setOpenedTest} />) : <div className="rounded-2xl border-2 border-dashed border-slate-200 p-8 text-center text-slate-500 md:col-span-2">No tests match these filters.</div>}
     </div>
     <Pagination page={pagedTests.page} pageSize={pageSize} totalItems={visibleTests.length} onPageChange={setPage} itemLabel="tests" className="mt-7 rounded-xl border border-slate-200 bg-white" />
     {openedTest && <TestDashboardModal test={openedTest} close={() => setOpenedTest(null)} />}
@@ -305,7 +319,8 @@ function TestCard({ test, openTestDashboard }: { test: LibraryTest; openTestDash
   const visibilityLabel = test.visibility === 'assigned' ? 'Assignment' : test.visibility === 'private' ? 'Private' : 'Public'
   return <article className="relative rounded-xl border border-slate-200 bg-white p-5 shadow-md shadow-slate-200/50 transition-transform hover:-translate-y-0.5">
     <span className={`absolute right-4 top-4 rounded-full px-2.5 py-1 text-[11px] font-black uppercase tracking-wide ${test.visibility === 'public' ? 'bg-emerald-50 text-emerald-700' : test.visibility === 'private' ? 'bg-amber-50 text-amber-700' : 'bg-violet-50 text-violet-700'}`}>{visibilityLabel}</span>
-    <h3 className="truncate pr-28 text-lg font-bold text-slate-950">{test.title}</h3>
+    <h3 className="truncate pr-28 text-lg font-bold text-slate-950">{test.assignmentName || test.title}</h3>
+    {test.assignmentName && <p className="mt-1 truncate pr-28 text-xs font-semibold text-slate-500">{test.title}</p>}
     <p className="mt-2 text-sm font-semibold text-indigo-600">{test.examAlias || test.exam || 'Unassigned exam'}</p>
     <p className="mt-1 text-sm text-slate-500">{categoryName(test)}</p>
     <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">
@@ -315,7 +330,7 @@ function TestCard({ test, openTestDashboard }: { test: LibraryTest; openTestDash
         <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-50 px-2.5 py-1.5 text-xs font-bold text-sky-700"><UiIcon name="clock" className="h-3.5 w-3.5" />{test.durationMinutes || '—'} min</span>
         {isUserAssignment && <span className="inline-flex rounded-full bg-violet-50 px-2.5 py-1.5 text-xs font-bold text-violet-700">{Math.max(0, (test.assignmentMaxAttempts || 1) - (test.assignmentAttemptsUsed || 0))} attempts left</span>}
       </div>
-      <div className="flex items-center gap-2">{!isUserAssignment && <button type="button" onClick={() => openTestDashboard(test)} aria-label={`Open dashboard for ${test.title}`} title="Test dashboard" className="grid h-8 w-8 place-items-center rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100"><UiIcon name="info" className="h-4 w-4" /></button>}{test.visibility === 'assigned' && !isUserAssignment ? <Link href="/assignments" className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-xs font-bold text-white hover:bg-violet-700">Create assignment</Link> : attemptsExhausted ? <span className="rounded-lg bg-slate-100 px-4 py-2 text-xs font-bold text-slate-500">Attempt limit reached</span> : <Link href={`/tests/${test.id}`} className="inline-flex items-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-xs font-bold text-white hover:bg-slate-800">Start test <span aria-hidden="true">→</span></Link>}</div>
+      <div className="flex items-center gap-2">{!isUserAssignment && <button type="button" onClick={() => openTestDashboard(test)} aria-label={`Open dashboard for ${test.title}`} title="Test dashboard" className="grid h-8 w-8 place-items-center rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100"><UiIcon name="info" className="h-4 w-4" /></button>}{test.visibility === 'assigned' && !isUserAssignment ? <Link href="/assignments" className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-xs font-bold text-white hover:bg-violet-700">Create assignment</Link> : attemptsExhausted ? <span className="rounded-lg bg-slate-100 px-4 py-2 text-xs font-bold text-slate-500">Attempt limit reached</span> : <Link href={`/tests/${test.id}${test.assignmentBatchId ? `?assignment=${encodeURIComponent(test.assignmentBatchId)}` : ''}`} className="inline-flex items-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-xs font-bold text-white hover:bg-slate-800">Start test <span aria-hidden="true">→</span></Link>}</div>
     </div>
   </article>
 }

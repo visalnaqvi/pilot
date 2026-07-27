@@ -13,7 +13,6 @@ import { MathText, MathTextEditor } from './math-components'
 import { SearchPicker } from './search-picker'
 import type { MockTest, Question, QuestionBankItem, QuestionContent, QuestionFormat, TestQuestion } from './test-types'
 import type { ExamCatalogEntry } from '@/lib/exam-catalog'
-import { assignmentWindowStatus } from '@/lib/assignment-window'
 
 type DraftQuestion = { key: string;
 questionId?: string;
@@ -257,29 +256,63 @@ router.push('/tests') } catch (reason) { setMessage(reason instanceof Error ? re
 if (!canManage) return <section><h1 className="text-3xl font-black">Access denied</h1></section>;
 return <section className="mx-auto max-w-3xl"><Link href={`/tests/${id}`} className="text-sm font-bold text-indigo-600">← Back to test</Link><div className="mt-5 flex justify-between gap-4"><h1 className="text-4xl font-black">Edit mock test</h1><button disabled={deleting} onClick={softDelete} className="rounded-lg border border-rose-200 px-3 py-2 text-sm font-bold text-rose-700">Soft delete</button></div>{message && <p className="mt-4 text-rose-700">{message}</p>}<TestEditor testId={id} initialTest={test} /></section> }
 
-function useTest(id: string, enabled = true) { const [test, setTest] = useState<MockTest | null>(null);
+type AssignmentWindow = { id: string; assignmentBatchId: string; assignmentName?: string; linkedTaskId?: string; maxAttempts?: number; attemptsUsed?: number; startAt?: { toDate: () => Date }; endAt?: { toDate: () => Date }; deadline?: { toDate: () => Date } }
+type TestSessionStatus = 'open' | 'not_started' | 'ended' | 'attempts_exhausted' | 'invalid'
+type TestSessionPayload = {
+  status?: TestSessionStatus
+  error?: string
+  test?: MockTest
+  questions?: Question[]
+  assignment?: {
+    id: string
+    assignmentBatchId: string
+    assignmentName?: string
+    linkedTaskId?: string
+    maxAttempts?: number
+    attemptsUsed?: number
+    startAt?: string
+    endAt?: string
+    deadline?: string
+  } | null
+}
+function useTestSession(id: string, requestedAssignmentBatchId: string | undefined, user?: { getIdToken: () => Promise<string> }) { const [test, setTest] = useState<MockTest | null>(null);
 const [questions, setQuestions] = useState<Question[]>([]);
-const [loading, setLoading] = useState(enabled);
+const [assignment, setAssignment] = useState<AssignmentWindow | null>(null);
+const [status, setStatus] = useState<TestSessionStatus | null>(null);
+const [loading, setLoading] = useState(true);
 const [error, setError] = useState('');
-useEffect(() => { if (!enabled) { setTest(null); setQuestions([]); setError(''); setLoading(false); return }
-setLoading(true); setError('');
-getDoc(doc(db, 'tests', id)).then(async (result) => { if (!result.exists()) return;
-const loaded = { id: result.id, ...result.data() } as MockTest;
-setTest(loaded);
-if (loaded.questions) { setQuestions(loaded.questions);
-return } const memberships = (await getDocs(collection(db, 'tests', id, 'questions'))).docs.map((item) => ({ id: item.id, ...item.data() }) as TestQuestion).sort((a, b) => a.position - b.position);
-const resolved = await Promise.all(memberships.map(async (membership) => { const source = await getDoc(doc(db, 'questions', membership.questionId));
-const content = source.exists() ? source.data() as QuestionBankItem : membership.snapshot;
-return content ? { prompt: content.prompt, options: content.options, correctAnswer: content.correctAnswer, promptImageUrl: content.promptImageUrl, optionImageUrls: content.optionImageUrls, format: content.format, marks: membership.marks } : null }));
-setQuestions(resolved.filter((question) => question !== null) as Question[]) }).catch((reason) => setError(reason.message)).finally(() => setLoading(false)) }, [enabled, id]);
-return { test, questions, loading, error } }
-type AssignmentWindow = { assignmentBatchId?: string; assignmentName?: string; linkedTaskId?: string; maxAttempts?: number; attemptsUsed?: number; startAt?: { toDate: () => Date }; endAt?: { toDate: () => Date }; deadline?: { toDate: () => Date } }
-function useAssignment(testId: string, userId?: string) { const [assignment, setAssignment] = useState<AssignmentWindow | null>(null);
-const [ready, setReady] = useState(false);
-useEffect(() => { if (!userId) return;
-getDoc(doc(db, 'testAssignments', `${testId}_${userId}`)).then((result) => { setAssignment(result.exists() ? result.data() as AssignmentWindow : null);
-setReady(true) }).catch(() => setReady(true)) }, [testId, userId]);
-return { assignment, ready } }
+useEffect(() => { if (!user) return;
+const controller = new AbortController();
+void (async () => {
+  try {
+    const queryString = new URLSearchParams({ testId: id })
+    if (requestedAssignmentBatchId) queryString.set('assignment', requestedAssignmentBatchId)
+    const response = await fetch(`/api/test-session?${queryString}`, {
+      headers: { authorization: `Bearer ${await user.getIdToken()}` },
+      signal: controller.signal,
+    })
+    const payload = await response.json().catch(() => ({})) as TestSessionPayload
+    if (!response.ok) throw new Error(payload.error || 'Unable to load this test.')
+    const loadedAssignment = payload.assignment
+      ? {
+          ...payload.assignment,
+          startAt: payload.assignment.startAt ? { toDate: () => new Date(payload.assignment!.startAt!) } : undefined,
+          endAt: payload.assignment.endAt ? { toDate: () => new Date(payload.assignment!.endAt!) } : undefined,
+          deadline: payload.assignment.deadline ? { toDate: () => new Date(payload.assignment!.deadline!) } : undefined,
+        }
+      : null
+    setAssignment(loadedAssignment)
+    setStatus(payload.status || null)
+    setTest(payload.test || null)
+    setQuestions(payload.questions || [])
+  } catch (reason) {
+    if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : 'Unable to load this test.')
+  } finally {
+    if (!controller.signal.aborted) setLoading(false)
+  }
+})()
+return () => controller.abort() }, [id, requestedAssignmentBatchId, user]);
+return { test, questions, assignment, status, loading, error } }
 function useAttemptCount(testId: string, userId?: string) { const [count, setCount] = useState(0);
 const [privateCount, setPrivateCount] = useState(0);
 const [ready, setReady] = useState(false);
@@ -288,11 +321,8 @@ return onSnapshot(query(collection(db, 'submissions'), where('testId', '==', tes
 setPrivateCount(snapshot.docs.filter(item => item.data().testVisibility === 'private').length);
 setReady(true) }, () => setReady(true)) }, [testId, userId]);
 return { count, privateCount, ready } }
-export function TakeTest({ id }: { id: string }) { const { user, profile, isImpersonating } = useAuth();
-const { assignment, ready } = useAssignment(id, user?.uid);
-const windowStatus = assignment ? assignmentWindowStatus(assignment) : null;
-const shouldLoadTest = ready && (!assignment || windowStatus === 'open');
-const { test, questions, loading, error } = useTest(id, shouldLoadTest);
+export function TakeTest({ id, assignmentBatchId }: { id: string; assignmentBatchId?: string }) { const { user, profile, isImpersonating } = useAuth();
+const { test, questions, assignment, status: windowStatus, loading, error } = useTestSession(id, assignmentBatchId, user || undefined);
 const { count: previousAttempts, privateCount: previousPrivateAttempts, ready: attemptsReady } = useAttemptCount(id, user?.uid);
 const router = useRouter();
 const [answers, setAnswers] = useState<Record<number, number>>({});
@@ -304,7 +334,7 @@ const [fullscreenError, setFullscreenError] = useState('');
 const [securityViolation, setSecurityViolation] = useState(false);
 const allowedFullscreenExit = useRef(false);
 const pendingAutoSubmitReason = useRef<'time_expired' | 'fullscreen_exited' | null>(null);
-if (!ready) return <p className="text-slate-500">Loading test…</p>;
+if (loading) return <p className="text-slate-500">Loading test…</p>;
 if (!user) return <p className="text-slate-500">Loading your test session…</p>;
 if (isImpersonating) return <TestAccessBlocked title="View-only impersonation" message="Exit impersonation before starting or submitting a test." />;
 const assignmentStart = assignment?.startAt?.toDate();
@@ -313,7 +343,7 @@ if (assignment && windowStatus === 'not_started') return <section className="mx-
 if (assignment && windowStatus === 'ended') return <section className="mx-auto max-w-2xl"><h1 className="text-3xl font-black">This assignment has ended</h1><p className="mt-3 text-slate-600">The access window closed on <b className="text-slate-900">{assignmentEnd?.toLocaleString()}</b>.</p><Link href="/tests" className="mt-6 inline-block text-sm font-bold text-indigo-600">← Back to tests</Link></section>;
 if (assignment && windowStatus === 'attempts_exhausted') return <TestAccessBlocked title="Assignment attempt limit reached" message={`You have used all ${assignment.maxAttempts || 1} attempt${(assignment.maxAttempts || 1) === 1 ? '' : 's'} allowed for this assignment.`} />;
 if (assignment && windowStatus === 'invalid') return <TestAccessBlocked title="Assignment unavailable" message="This assignment does not have a valid access window. Contact your institute." />;
-if (loading || !attemptsReady) return <p className="text-slate-500">Loading test…</p>;
+if (!attemptsReady) return <p className="text-slate-500">Loading test…</p>;
 if (!test) return <section><h1 className="text-3xl font-black">Test unavailable</h1><p>{error || 'This test does not exist or you do not have access to it.'}</p></section>;
 const isAssignedTest = test.visibility === 'assigned';
 const requiresSecureMode = test.visibility !== 'public';
@@ -370,7 +400,8 @@ await runTransaction(db, async transaction => {
   let attemptNumber = test.visibility === 'private' ? previousPrivateAttempts + 1 : previousAttempts + 1
   let assignmentBatchId: string | undefined
   if (test.visibility === 'assigned') {
-    const assignmentRef = doc(db, 'testAssignments', `${test.id}_${user.uid}`)
+    if (!assignment?.assignmentBatchId) throw new Error('This assignment is missing its attempt-tracking information. Ask the institute to recreate it.')
+    const assignmentRef = doc(db, 'testAssignments', assignment.id)
     const assignmentSnapshot = await transaction.get(assignmentRef)
     if (!assignmentSnapshot.exists()) throw new Error('This test is not assigned to you.')
     const assignmentData = assignmentSnapshot.data() as AssignmentWindow
@@ -422,10 +453,10 @@ await runTransaction(db, async transaction => {
   transaction.set(submissionRef, submission)
   organisationIds.forEach((organisationId) => transaction.set(doc(db, 'organisationSubmissions', `${submissionRef.id}_${organisationId}`), { ...submission, organisationId }))
 })
-try { window.localStorage.removeItem(testTimerKey(test.id, user.uid)) } catch { /* Submission is already saved. */ }
+try { window.localStorage.removeItem(testTimerKey(test.id, user.uid, assignment?.assignmentBatchId)) } catch { /* Submission is already saved. */ }
 allowedFullscreenExit.current = true;
 if (document.fullscreenElement) { try { await document.exitFullscreen() } catch { /* Navigation can still complete. */ } }
-router.push(`/tests/${id}/result?score=${score}&correct=${correct}`) } catch (reason) { setSubmitError(reason instanceof Error ? reason.message : 'Unable to save your submission. Please try again.') } finally { submittingRef.current = false; setSubmitting(false) } };
+router.push(`/tests/${id}/result?score=${score}&correct=${correct}&total=${questions.reduce((sum, item) => sum + item.marks, 0)}&questions=${questions.length}`) } catch (reason) { setSubmitError(reason instanceof Error ? reason.message : 'Unable to save your submission. Please try again.') } finally { submittingRef.current = false; setSubmitting(false) } };
 const startSecureSession = async () => {
   setFullscreenError('')
   if (!document.fullscreenEnabled) { setFullscreenError('This browser does not support the required fullscreen exam mode.'); return }
@@ -444,7 +475,7 @@ if (requiresSecureMode && !sessionStarted) return <SecureTestStart test={test} q
 if (requiresSecureMode && securityViolation) return <section className="mx-auto max-w-2xl"><div className="rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm"><span className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-rose-100 text-rose-700"><ShieldAlertIcon /></span><p className="mt-5 text-sm font-bold tracking-widest text-rose-600">SECURE MODE ENDED</p><h1 className="mt-2 text-3xl font-black">Fullscreen was exited</h1><p className="mt-3 text-slate-600">Your test is being submitted automatically according to the exam rules.</p>{submitError && <><p className="mt-5 rounded-xl bg-rose-50 p-4 text-sm text-rose-700">{submitError}</p><button type="button" disabled={submitting} onClick={() => void submit()} className="mt-5 rounded-xl bg-rose-600 px-5 py-3 font-bold text-white disabled:opacity-50">Retry submission</button></>}</div></section>;
 const attemptedCount = Object.keys(answers).length;
 const progress = questions.length ? attemptedCount / questions.length * 100 : 0;
-return <section className="mx-auto max-w-6xl">{requiresSecureMode && <SecureExamGuard allowedExit={allowedFullscreenExit} onViolation={() => { setSecurityViolation(true); void submit({ reason: 'fullscreen_exited' }) }} />}<div className="rounded-2xl bg-slate-900 p-7 text-white"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-sm font-bold tracking-widest text-indigo-300">{requiresSecureMode ? 'SECURE MOCK TEST' : 'PUBLIC MOCK TEST'}</p><h1 className="mt-2 text-3xl font-black">{test.title}</h1><p className="mt-3 text-slate-300">{questions.length} questions · {test.durationMinutes || 'No'} minute limit</p></div>{requiresSecureMode ? <span className="inline-flex items-center gap-2 rounded-full bg-emerald-500/15 px-3 py-1.5 text-xs font-bold text-emerald-300"><span className="h-2 w-2 rounded-full bg-emerald-400" />Fullscreen active</span> : <span className="inline-flex items-center gap-2 rounded-full bg-sky-500/15 px-3 py-1.5 text-xs font-bold text-sky-300">Standard timed mode</span>}</div></div><div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_18rem] lg:items-start"><main className="space-y-5">{questions.map((question, questionIndex) => <article id={`question-${questionIndex + 1}`} key={questionIndex} className="scroll-mt-6 rounded-2xl border border-slate-200 bg-white p-6"><p className="text-sm font-bold text-indigo-600">QUESTION {questionIndex + 1} · {question.marks} MARK{question.marks === 1 ? '' : 'S'}</p><h2 className="mt-2 text-lg font-bold"><MathText>{question.prompt}</MathText></h2>{question.promptImageUrl && <Image src={question.promptImageUrl} alt={`Question ${questionIndex + 1}`} width={960} height={540} unoptimized className="mt-4 max-h-96 rounded-xl border border-slate-200 object-contain" />}<div className="mt-5 grid gap-3">{question.options.map((option, optionIndex) => <label key={optionIndex} className={`flex cursor-pointer items-center gap-3 rounded-xl border p-4 ${answers[questionIndex] === optionIndex ? 'border-indigo-500 bg-indigo-50' : 'border-slate-200'}`}><input type="radio" name={`answer-${questionIndex}`} checked={answers[questionIndex] === optionIndex} onChange={() => setAnswers((current) => ({ ...current, [questionIndex]: optionIndex }))} /><span className="min-w-0"><MathText>{option}</MathText>{question.optionImageUrls?.[optionIndex] && <Image src={question.optionImageUrls[optionIndex]} alt={`Option ${String.fromCharCode(65 + optionIndex)}`} width={640} height={360} unoptimized className="mt-3 max-h-56 rounded-lg border border-slate-200 object-contain" />}</span></label>)}</div></article>)}{submitError && <p className="rounded-xl bg-rose-50 p-4 text-sm text-rose-700">{submitError}</p>}<button disabled={submitting} onClick={() => void submit()} className="w-full rounded-xl bg-indigo-600 py-4 font-bold text-white disabled:opacity-50">{submitting ? 'Saving submission…' : 'Submit test'}</button></main><aside className="order-first lg:order-none lg:sticky lg:top-6"><div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><TestTimer durationMinutes={test.durationMinutes} assignmentEndAt={assignmentEnd?.getTime()} storageKey={testTimerKey(test.id, user.uid)} onExpire={() => void submit({ reason: 'time_expired' })} /><div className="mt-5 border-t border-slate-200 pt-5"><div className="flex items-center justify-between gap-3"><h2 className="font-black text-slate-900">Progress</h2><span className="text-sm font-bold text-indigo-700">{attemptedCount}/{questions.length}</span></div><div className="mt-3 h-2.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-indigo-600 transition-[width] duration-300" style={{ width: `${progress}%` }} /></div><p className="mt-2 text-xs text-slate-500">{Math.round(progress)}% attempted</p></div><div className="mt-5 border-t border-slate-200 pt-5"><h2 className="font-black text-slate-900">Questions</h2><div className="mt-3 grid grid-cols-5 gap-2">{questions.map((_, index) => { const attempted = answers[index] !== undefined; return <button key={index} type="button" onClick={() => document.getElementById(`question-${index + 1}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })} aria-label={`Go to question ${index + 1}, ${attempted ? 'attempted' : 'pending'}`} className={`grid h-10 place-items-center rounded-lg border text-sm font-black transition-colors ${attempted ? 'border-emerald-500 bg-emerald-500 text-white' : 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100'}`}>{index + 1}</button> })}</div><div className="mt-4 flex flex-wrap gap-3 text-xs font-semibold text-slate-600"><span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-emerald-500" />Attempted</span><span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-amber-300" />Pending</span></div></div></div></aside></div></section> }
+return <section className="mx-auto max-w-6xl">{requiresSecureMode && <SecureExamGuard allowedExit={allowedFullscreenExit} onViolation={() => { setSecurityViolation(true); void submit({ reason: 'fullscreen_exited' }) }} />}<div className="rounded-2xl bg-slate-900 p-7 text-white"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-sm font-bold tracking-widest text-indigo-300">{requiresSecureMode ? 'SECURE MOCK TEST' : 'PUBLIC MOCK TEST'}</p><h1 className="mt-2 text-3xl font-black">{test.title}</h1><p className="mt-3 text-slate-300">{questions.length} questions · {test.durationMinutes || 'No'} minute limit</p></div>{requiresSecureMode ? <span className="inline-flex items-center gap-2 rounded-full bg-emerald-500/15 px-3 py-1.5 text-xs font-bold text-emerald-300"><span className="h-2 w-2 rounded-full bg-emerald-400" />Fullscreen active</span> : <span className="inline-flex items-center gap-2 rounded-full bg-sky-500/15 px-3 py-1.5 text-xs font-bold text-sky-300">Standard timed mode</span>}</div></div><div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_18rem] lg:items-start"><main className="space-y-5">{questions.map((question, questionIndex) => <article id={`question-${questionIndex + 1}`} key={questionIndex} className="scroll-mt-6 rounded-2xl border border-slate-200 bg-white p-6"><p className="text-sm font-bold text-indigo-600">QUESTION {questionIndex + 1} · {question.marks} MARK{question.marks === 1 ? '' : 'S'}</p><h2 className="mt-2 text-lg font-bold"><MathText>{question.prompt}</MathText></h2>{question.promptImageUrl && <Image src={question.promptImageUrl} alt={`Question ${questionIndex + 1}`} width={960} height={540} unoptimized className="mt-4 max-h-96 rounded-xl border border-slate-200 object-contain" />}<div className="mt-5 grid gap-3">{question.options.map((option, optionIndex) => <label key={optionIndex} className={`flex cursor-pointer items-center gap-3 rounded-xl border p-4 ${answers[questionIndex] === optionIndex ? 'border-indigo-500 bg-indigo-50' : 'border-slate-200'}`}><input type="radio" name={`answer-${questionIndex}`} checked={answers[questionIndex] === optionIndex} onChange={() => setAnswers((current) => ({ ...current, [questionIndex]: optionIndex }))} /><span className="min-w-0"><MathText>{option}</MathText>{question.optionImageUrls?.[optionIndex] && <Image src={question.optionImageUrls[optionIndex]} alt={`Option ${String.fromCharCode(65 + optionIndex)}`} width={640} height={360} unoptimized className="mt-3 max-h-56 rounded-lg border border-slate-200 object-contain" />}</span></label>)}</div></article>)}{submitError && <p className="rounded-xl bg-rose-50 p-4 text-sm text-rose-700">{submitError}</p>}<button disabled={submitting} onClick={() => void submit()} className="w-full rounded-xl bg-indigo-600 py-4 font-bold text-white disabled:opacity-50">{submitting ? 'Saving submission…' : 'Submit test'}</button></main><aside className="order-first lg:order-none lg:sticky lg:top-6"><div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><TestTimer durationMinutes={test.durationMinutes} assignmentEndAt={assignmentEnd?.getTime()} storageKey={testTimerKey(test.id, user.uid, assignment?.assignmentBatchId)} onExpire={() => void submit({ reason: 'time_expired' })} /><div className="mt-5 border-t border-slate-200 pt-5"><div className="flex items-center justify-between gap-3"><h2 className="font-black text-slate-900">Progress</h2><span className="text-sm font-bold text-indigo-700">{attemptedCount}/{questions.length}</span></div><div className="mt-3 h-2.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-indigo-600 transition-[width] duration-300" style={{ width: `${progress}%` }} /></div><p className="mt-2 text-xs text-slate-500">{Math.round(progress)}% attempted</p></div><div className="mt-5 border-t border-slate-200 pt-5"><h2 className="font-black text-slate-900">Questions</h2><div className="mt-3 grid grid-cols-5 gap-2">{questions.map((_, index) => { const attempted = answers[index] !== undefined; return <button key={index} type="button" onClick={() => document.getElementById(`question-${index + 1}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })} aria-label={`Go to question ${index + 1}, ${attempted ? 'attempted' : 'pending'}`} className={`grid h-10 place-items-center rounded-lg border text-sm font-black transition-colors ${attempted ? 'border-emerald-500 bg-emerald-500 text-white' : 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100'}`}>{index + 1}</button> })}</div><div className="mt-4 flex flex-wrap gap-3 text-xs font-semibold text-slate-600"><span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-emerald-500" />Attempted</span><span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-amber-300" />Pending</span></div></div></div></aside></div></section> }
 
 function TestAccessBlocked({ title, message }: { title: string; message: string }) {
   return <section className="mx-auto max-w-2xl"><div className="rounded-2xl border border-amber-200 bg-white p-8 text-center shadow-sm"><h1 className="text-3xl font-black text-slate-950">{title}</h1><p className="mt-3 text-slate-600">{message}</p><Link href="/tests" className="mt-6 inline-block rounded-xl bg-indigo-600 px-5 py-3 text-sm font-bold text-white">Back to tests</Link></div></section>
@@ -473,7 +504,7 @@ function RuleCheck() { return <span className="mt-1 grid h-5 w-5 shrink-0 place-
 function ShieldIcon() { return <svg aria-hidden="true" viewBox="0 0 24 24" className="h-8 w-8" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3 4.5 6v5.5c0 4.6 3 7.6 7.5 9.5 4.5-1.9 7.5-4.9 7.5-9.5V6L12 3Z" /><path d="m9 12 2 2 4-4" /></svg> }
 function ShieldAlertIcon() { return <svg aria-hidden="true" viewBox="0 0 24 24" className="h-7 w-7" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3 4.5 6v5.5c0 4.6 3 7.6 7.5 9.5 4.5-1.9 7.5-4.9 7.5-9.5V6L12 3Z" /><path d="M12 8v5M12 16h.01" /></svg> }
 
-const testTimerKey = (testId: string, userId: string) => `mockpilot:test-timer:${testId}:${userId}`
+const testTimerKey = (testId: string, userId: string, assignmentBatchId?: string) => `mockpilot:test-timer:${testId}:${userId}${assignmentBatchId ? `:${assignmentBatchId}` : ''}`
 
 function TestTimer({ durationMinutes, assignmentEndAt, storageKey, onExpire }: { durationMinutes: number; assignmentEndAt?: number; storageKey: string; onExpire: () => void }) {
   const [remaining, setRemaining] = useState<number | null>(null)
@@ -508,11 +539,10 @@ function TestTimer({ durationMinutes, assignmentEndAt, storageKey, onExpire }: {
   const urgent = remaining <= 5 * 60_000
   return <div aria-live={urgent ? 'polite' : 'off'}><p className="text-xs font-bold uppercase tracking-widest text-slate-500">Time remaining</p><p className={`mt-2 font-mono text-3xl font-black tabular-nums ${urgent ? 'text-rose-600' : 'text-slate-900'}`}>{label}</p>{urgent && <p className="mt-1 text-xs font-semibold text-rose-600">Your test will submit automatically.</p>}</div>
 }
-export function TestResult({ id, score, correct }: { id: string;
+export function TestResult({ score, correct, total, questionCount }: {
 score: number;
-correct: number }) { const { test, questions, loading } = useTest(id);
-if (loading) return <p className="text-slate-500">Loading result…</p>;
-if (!test) return <section><h1 className="text-3xl font-black">Test unavailable</h1></section>;
-const total = questions.reduce((sum, item) => sum + item.marks, 0);
-return <section className="mx-auto max-w-2xl text-center"><div className="rounded-3xl bg-white p-10 shadow-sm"><p className="text-sm font-bold tracking-widest text-indigo-600">TEST COMPLETE</p><h1 className="mt-3 text-3xl font-black">Here&apos;s your score</h1><div className="mx-auto mt-8 grid h-44 w-44 place-items-center rounded-full border-[12px] border-indigo-100 text-indigo-600"><div><strong className="text-5xl font-black">{score}</strong><span className="text-lg font-bold">/{total}</span></div></div><p className="mt-7 text-lg text-slate-600">You answered <b className="text-slate-900">{correct} of {questions.length}</b> questions correctly.</p><Link href="/tests" className="mt-8 inline-block rounded-xl bg-indigo-600 px-6 py-3 font-bold text-white">Back to test library</Link></div></section> }
+correct: number;
+total: number;
+questionCount: number }) {
+return <section className="mx-auto max-w-2xl text-center"><div className="rounded-3xl bg-white p-10 shadow-sm"><p className="text-sm font-bold tracking-widest text-indigo-600">TEST COMPLETE</p><h1 className="mt-3 text-3xl font-black">Here&apos;s your score</h1><div className="mx-auto mt-8 grid h-44 w-44 place-items-center rounded-full border-[12px] border-indigo-100 text-indigo-600"><div><strong className="text-5xl font-black">{score}</strong><span className="text-lg font-bold">/{total}</span></div></div><p className="mt-7 text-lg text-slate-600">You answered <b className="text-slate-900">{correct} of {questionCount}</b> questions correctly.</p><Link href="/tests" className="mt-8 inline-block rounded-xl bg-indigo-600 px-6 py-3 font-bold text-white">Back to test library</Link></div></section> }
 

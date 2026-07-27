@@ -8,6 +8,7 @@ import { resolveAssignmentAudience } from '@/lib/task-api'
 import { ensureTaskEmailJobs } from '@/lib/task-email-jobs'
 import { taskEmailJobId } from '@/lib/task-email-plan'
 import { processTaskEmailJob } from '@/lib/task-email-worker'
+import { assignmentInstanceId } from '@/lib/assignment-instance'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -47,7 +48,7 @@ async function repairMissingAssignmentDocuments(
   for (let index = 0; index < assignees.length; index += 450) {
     const chunk = assignees.slice(index, index + 450)
     const references = chunk.map(assignee => (
-      adminDb.collection('testAssignments').doc(`${batchData.testId}_${assignee.userId}`)
+      adminDb.collection('testAssignments').doc(assignmentInstanceId(assignmentBatchId, assignee.userId))
     ))
     const snapshots = await adminDb.getAll(...references)
     const missing = snapshots
@@ -200,7 +201,7 @@ export async function POST(request: Request) {
       statusUpdatedByName: auth.user.name,
     })
     audience.assignees.slice(0, 448).forEach(assignee => {
-      firstWrite.set(adminDb.collection('testAssignments').doc(`${input.testId}_${assignee.userId}`), {
+      firstWrite.set(adminDb.collection('testAssignments').doc(assignmentInstanceId(input.assignmentBatchId, assignee.userId)), {
         ...baseAssignment,
         userId: assignee.userId,
         userEmail: assignee.userEmail,
@@ -210,7 +211,7 @@ export async function POST(request: Request) {
     for (let index = 448; index < audience.assignees.length; index += 450) {
       const write = adminDb.batch()
       audience.assignees.slice(index, index + 450).forEach(assignee => {
-        write.set(adminDb.collection('testAssignments').doc(`${input.testId}_${assignee.userId}`), {
+        write.set(adminDb.collection('testAssignments').doc(assignmentInstanceId(input.assignmentBatchId, assignee.userId)), {
           ...baseAssignment,
           userId: assignee.userId,
           userEmail: assignee.userEmail,

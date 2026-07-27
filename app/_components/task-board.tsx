@@ -1012,7 +1012,7 @@ function TaskDetailDialog({ task, comments, role, currentUserId, now, assigneeSt
               ? <span aria-disabled="true" className="mt-3 block cursor-not-allowed rounded-lg bg-slate-300 px-4 py-3 text-center text-sm font-black text-slate-600">Starts {formatDate(task.startAt || undefined, true)}</span>
               : userFrozen
                 ? <span aria-disabled="true" className="mt-3 block cursor-not-allowed rounded-lg bg-slate-300 px-4 py-3 text-center text-sm font-black text-slate-600">Assignment ended</span>
-                : <Link href={`/tests/${task.linkedTestId}`} className="mt-3 block rounded-lg bg-indigo-600 px-4 py-3 text-center text-sm font-black text-white shadow-sm hover:bg-indigo-700">{userStatus === 'in_progress' ? 'Continue assignment' : userStatus === 'done' ? 'Open assignment' : 'Start assignment'}</Link>}
+                : <Link href={`/tests/${task.linkedTestId}${task.linkedAssignmentBatchId ? `?assignment=${encodeURIComponent(task.linkedAssignmentBatchId)}` : ''}`} className="mt-3 block rounded-lg bg-indigo-600 px-4 py-3 text-center text-sm font-black text-white shadow-sm hover:bg-indigo-700">{userStatus === 'in_progress' ? 'Continue assignment' : userStatus === 'done' ? 'Open assignment' : 'Start assignment'}</Link>}
           </div>}
           {userFrozen && <div className="mb-5 rounded-xl border border-rose-200 bg-rose-50 p-4"><p className="text-xs font-black tracking-wider text-rose-700">DEADLINE PASSED</p><p className="mt-1 text-sm leading-5 text-rose-800">Your task is frozen. Only the institute can change its status now.</p></div>}
           <p className="text-xs font-black tracking-wider text-slate-400">YOUR STATUS</p>

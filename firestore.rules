@@ -22,8 +22,8 @@ service cloud.firestore {
       let inviteId = organisationId + '_' + userId;
       return /databases/$(database)/documents/organisationInvites/$(inviteId);
     }
-    function testAssignmentPath(testId, userId) {
-      let assignmentId = testId + '_' + userId;
+    function testAssignmentPath(assignmentBatchId, userId) {
+      let assignmentId = assignmentBatchId + '_' + userId;
       return /databases/$(database)/documents/testAssignments/$(assignmentId);
     }
     function belongsToOrganisation(organisationId) {
@@ -36,16 +36,14 @@ service cloud.firestore {
       return signedIn() && ((test.deletedAt != null && (isAdmin() || (isOrganisation() && test.createdBy == request.auth.uid)))
         || (test.deletedAt == null && (isAdmin() || test.visibility == 'public'
           || (test.visibility == 'private' && belongsToOrganisation(test.organisationId))
-          || (test.visibility == 'assigned' && ((isOrganisation() && test.createdBy == request.auth.uid)
-            || exists(testAssignmentPath(testId, request.auth.uid)))))));
+          || (test.visibility == 'assigned' && isOrganisation() && test.createdBy == request.auth.uid))));
     }
     function canListTest(testId) {
       let test = resource.data;
       return signedIn() && ((test.deletedAt != null && (isAdmin() || (isOrganisation() && test.createdBy == request.auth.uid)))
         || (test.deletedAt == null && (isAdmin() || test.visibility == 'public'
           || (test.visibility == 'private' && belongsToOrganisation(test.organisationId))
-          || (test.visibility == 'assigned' && ((isOrganisation() && test.createdBy == request.auth.uid)
-            || exists(testAssignmentPath(testId, request.auth.uid)))))));
+          || (test.visibility == 'assigned' && isOrganisation() && test.createdBy == request.auth.uid))));
     }
     function canManageTest(testId) {
       return isAdmin() || (isOrganisation() && get(/databases/$(database)/documents/tests/$(testId)).data.createdBy == request.auth.uid);
@@ -67,21 +65,27 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/tests/$(testId)).data.deletedAt == null
         && get(/databases/$(database)/documents/tests/$(testId)).data.visibility == 'assigned';
     }
-    function assignmentWindowOpen(testId, userId) {
-      let assignment = testAssignmentPath(testId, userId);
-      return exists(assignment) && ((!('startAt' in get(assignment).data) || get(assignment).data.startAt <= request.time)
+    function assignmentWindowOpen(testId, assignmentBatchId, userId) {
+      let assignment = testAssignmentPath(assignmentBatchId, userId);
+      return exists(assignment)
+        && get(assignment).data.testId == testId
+        && get(assignment).data.assignmentBatchId == assignmentBatchId
+        && ((!('startAt' in get(assignment).data) || get(assignment).data.startAt <= request.time)
         && get(assignment).data.deadline >= request.time
         && get(assignment).data.attemptsUsed < get(assignment).data.maxAttempts);
     }
-    function assignmentSubmissionWindowOpen(testId, userId) {
-      let assignment = testAssignmentPath(testId, userId);
-      return exists(assignment) && ((!('startAt' in get(assignment).data) || get(assignment).data.startAt <= request.time)
+    function assignmentSubmissionWindowOpen(testId, assignmentBatchId, userId) {
+      let assignment = testAssignmentPath(assignmentBatchId, userId);
+      return exists(assignment)
+        && get(assignment).data.testId == testId
+        && get(assignment).data.assignmentBatchId == assignmentBatchId
+        && ((!('startAt' in get(assignment).data) || get(assignment).data.startAt <= request.time)
         && get(assignment).data.deadline + duration.value(1, 'm') >= request.time);
     }
     function canOpenTest(testId) {
       let test = get(/databases/$(database)/documents/tests/$(testId)).data;
       return isAdmin() || (isOrganisation() && test.createdBy == request.auth.uid)
-        || test.visibility != 'assigned' || assignmentWindowOpen(testId, request.auth.uid);
+        || test.visibility != 'assigned';
     }
     function validPrivateSubmission(testId, data) {
       let test = get(/databases/$(database)/documents/tests/$(testId)).data;
@@ -90,9 +94,10 @@ service cloud.firestore {
         && data.attemptNumber > 0;
     }
     function validAssignedSubmission(testId, submissionId, data) {
-      let assignment = testAssignmentPath(testId, request.auth.uid);
+      let assignment = testAssignmentPath(data.assignmentBatchId, request.auth.uid);
       return get(/databases/$(database)/documents/tests/$(testId)).data.visibility == 'assigned'
-        && assignmentSubmissionWindowOpen(testId, request.auth.uid)
+        && data.assignmentBatchId is string
+        && assignmentSubmissionWindowOpen(testId, data.assignmentBatchId, request.auth.uid)
         && data.testVisibility == 'assigned' && data.attemptNumber is int
         && data.assignmentBatchId == get(assignment).data.assignmentBatchId
         && data.attemptNumber == get(assignment).data.attemptsUsed + 1
@@ -407,8 +412,8 @@ service cloud.firestore {
     match /testAssignments/{assignmentId} {
       allow get, list: if signedIn() && (resource.data.userId == request.auth.uid || resource.data.assignedBy == request.auth.uid || isAdmin());
       allow create: if false;
-      allow update: if (canAssignTest(resource.data.testId) && request.resource.data.testId == resource.data.testId && request.resource.data.userId == resource.data.userId && request.resource.data.assignedBy == resource.data.assignedBy && request.resource.data.maxAttempts is int && request.resource.data.maxAttempts > 0 && request.resource.data.attemptsUsed is int && request.resource.data.attemptsUsed >= 0 && request.resource.data.startAt is timestamp && request.resource.data.deadline is timestamp && request.resource.data.startAt < request.resource.data.deadline && request.resource.data.endAt == request.resource.data.deadline && request.resource.data.deadline > request.time)
-        || (signedIn() && resource.data.userId == request.auth.uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['attemptsUsed']) && request.resource.data.attemptsUsed == resource.data.attemptsUsed + 1 && request.resource.data.attemptsUsed <= resource.data.maxAttempts && resource.data.startAt <= request.time && resource.data.deadline + duration.value(1, 'm') >= request.time);
+      allow update: if (canAssignTest(resource.data.testId) && assignmentId == resource.data.assignmentBatchId + '_' + resource.data.userId && request.resource.data.testId == resource.data.testId && request.resource.data.assignmentBatchId == resource.data.assignmentBatchId && request.resource.data.userId == resource.data.userId && request.resource.data.assignedBy == resource.data.assignedBy && request.resource.data.maxAttempts is int && request.resource.data.maxAttempts > 0 && request.resource.data.attemptsUsed is int && request.resource.data.attemptsUsed >= 0 && request.resource.data.startAt is timestamp && request.resource.data.deadline is timestamp && request.resource.data.startAt < request.resource.data.deadline && request.resource.data.endAt == request.resource.data.deadline && request.resource.data.deadline > request.time)
+        || (signedIn() && assignmentId == resource.data.assignmentBatchId + '_' + request.auth.uid && resource.data.userId == request.auth.uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['attemptsUsed']) && request.resource.data.attemptsUsed == resource.data.attemptsUsed + 1 && request.resource.data.attemptsUsed <= resource.data.maxAttempts && resource.data.startAt <= request.time && resource.data.deadline + duration.value(1, 'm') >= request.time);
       allow delete: if canAssignTest(resource.data.testId);
     }
 

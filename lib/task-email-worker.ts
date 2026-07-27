@@ -62,7 +62,7 @@ function timestampDate(value?: Timestamp | null) {
 function actionUrl(task: TaskData) {
   const base = (process.env.APP_BASE_URL || 'http://localhost:3000').replace(/\/+$/, '')
   const path = task.sourceType === 'assignment' && task.linkedTestId
-    ? `/tests/${encodeURIComponent(task.linkedTestId)}`
+    ? `/tests/${encodeURIComponent(task.linkedTestId)}${task.linkedAssignmentBatchId ? `?assignment=${encodeURIComponent(task.linkedAssignmentBatchId)}` : ''}`
     : '/tasks'
   return `${base}${path}`
 }

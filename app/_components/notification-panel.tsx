@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { collection, onSnapshot, query, where } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
+import { assignmentInstanceId } from '@/lib/assignment-instance'
 import { useAuth } from './auth-context'
 
 type DateValue = { toDate: () => Date }
@@ -11,6 +12,7 @@ type Assignment = {
   id: string
   testId: string
   testTitle?: string
+  assignmentBatchId?: string
   assignmentName?: string
   assignedBy: string
   attemptsUsed?: number
@@ -134,9 +136,14 @@ export function NotificationPanel() {
 
   useEffect(() => {
     if (!user || role !== 'user') return
+    void user.getIdToken().then(token => fetch('/api/test-session?list=assignments', {
+      headers: { authorization: `Bearer ${token}` },
+    })).catch(() => undefined)
     return onSnapshot(
       query(collection(db, 'testAssignments'), where('userId', '==', user.uid)),
-      snapshot => setAssignments(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as Assignment)),
+      snapshot => setAssignments(snapshot.docs
+        .map(item => ({ id: item.id, ...item.data() }) as Assignment)
+        .filter(item => !!item.assignmentBatchId && item.id === assignmentInstanceId(item.assignmentBatchId, user.uid))),
       reason => handleSnapshotError('assignments', reason),
     )
   }, [handleSnapshotError, role, user])
@@ -241,7 +248,7 @@ export function NotificationPanel() {
             title: `${name} is live`,
             detail: `Available until ${formatDate(end)} · ${remainingAttempts} attempt${remainingAttempts === 1 ? '' : 's'} left`,
             at: start,
-            href: `/tests/${assignment.testId}`,
+            href: `/tests/${assignment.testId}${assignment.assignmentBatchId ? `?assignment=${encodeURIComponent(assignment.assignmentBatchId)}` : ''}`,
             tone: 'emerald',
             icon: 'live',
           })
