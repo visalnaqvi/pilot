@@ -1,6 +1,7 @@
 import 'server-only'
 
-import { adminAuth, adminDb } from '@/lib/firebase-admin'
+import { adminDb } from '@/lib/firebase-admin'
+import { verifyFirebaseIdToken } from '@/lib/firebase-id-token'
 
 export type ServerRole = 'user' | 'organisation' | 'admin'
 
@@ -8,7 +9,7 @@ export async function requireRole(request: Request, allowedRoles: ServerRole[]) 
   const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
   if (!token) return { error: Response.json({ error: 'Authentication required.' }, { status: 401 }) } as const
   try {
-    const decoded = await adminAuth.verifyIdToken(token)
+    const decoded = await verifyFirebaseIdToken(token)
     const profile = await adminDb.collection('users').doc(decoded.uid).get()
     const role = profile.data()?.role as ServerRole | undefined
     if (!profile.exists || !role || !allowedRoles.includes(role)) {

@@ -26,7 +26,6 @@ function adminApp() {
 }
 
 const app = adminApp()
-export const adminAuthCore = admin.auth(app)
 export const adminDbCore = admin.firestore(app)
 export const adminStorageCore = admin.storage(app)
 export const adminFieldValueCore = admin.firestore.FieldValue

@@ -1,6 +1,7 @@
 import OpenAI from 'openai'
-import { adminAuth, adminDb, FieldValue } from '@/lib/firebase-admin'
+import { adminDb, FieldValue } from '@/lib/firebase-admin'
 import { cleanAliases, examCatalogId, normalizeExamKey, type ExamCatalogEntry } from '@/lib/exam-catalog'
+import { verifyFirebaseIdToken } from '@/lib/firebase-id-token'
 
 export const runtime = 'nodejs'
 
@@ -107,7 +108,7 @@ export async function POST(request: Request) {
   try {
     const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
     if (!token) return jsonError('Sign in to add an exam.', 401)
-    const decoded = await adminAuth.verifyIdToken(token)
+    const decoded = await verifyFirebaseIdToken(token)
     const profile = await adminDb.collection('users').doc(decoded.uid).get()
     if (!profile.exists || !['admin', 'organisation'].includes(profile.data()?.role)) return jsonError('You are not allowed to add exams.', 403)
     const body: unknown = await request.json()
