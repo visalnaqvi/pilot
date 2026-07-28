@@ -1,8 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Keep Firebase Admin inside the server bundle across Vercel runtimes.
-  transpilePackages: ['firebase-admin'],
+  // Firebase Admin is a Node.js server SDK. Keep it external so Node resolves
+  // the package's CommonJS entry points instead of bundling its ESM wrappers.
+  serverExternalPackages: ['firebase-admin'],
   images: {
     remotePatterns: [
       {
