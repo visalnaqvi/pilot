@@ -1,7 +1,6 @@
 import 'server-only'
 
-import { FieldValue, Timestamp } from 'firebase-admin/firestore'
-import { adminDb } from '@/lib/firebase-admin'
+import { adminDb, FieldValue, Timestamp } from '@/lib/firebase-admin'
 import {
   ExamCycleDetailsSchema,
   emptyExamCycle,

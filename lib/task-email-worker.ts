@@ -1,7 +1,7 @@
 import 'server-only'
 
-import { FieldValue, Timestamp, type DocumentData, type DocumentReference } from 'firebase-admin/firestore'
-import { adminDb } from './firebase-admin'
+import type { DocumentData, DocumentReference, Timestamp as FirestoreTimestamp } from 'firebase-admin/firestore'
+import { adminDb, FieldValue, Timestamp } from './firebase-admin'
 import { isEmailConfigured, sendEmail } from './email'
 import { buildTaskEmail, isEmailAddress } from './task-email-content'
 import {
@@ -15,8 +15,8 @@ type JobData = {
   taskId: string
   eventType: TaskEmailEventType
   status: 'pending' | 'processing' | 'completed' | 'failed'
-  nextAttemptAt: Timestamp
-  leaseUntil?: Timestamp | null
+  nextAttemptAt: FirestoreTimestamp
+  leaseUntil?: FirestoreTimestamp | null
   attempts?: number
 }
 
@@ -36,8 +36,8 @@ type TaskData = {
   sourceType?: 'assignment'
   linkedAssignmentBatchId?: string
   linkedTestId?: string
-  startAt?: Timestamp | null
-  endAt?: Timestamp | null
+  startAt?: FirestoreTimestamp | null
+  endAt?: FirestoreTimestamp | null
   isClosed?: boolean
   closedBy?: string
 }
@@ -55,7 +55,7 @@ function sanitizeError(error: unknown) {
   return message.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]').slice(0, 500)
 }
 
-function timestampDate(value?: Timestamp | null) {
+function timestampDate(value?: FirestoreTimestamp | null) {
   return value?.toDate() || null
 }
 

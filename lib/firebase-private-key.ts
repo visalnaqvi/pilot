@@ -14,3 +14,11 @@ export function normalizeFirebasePrivateKey(value: string | undefined) {
     .replace(/\r\n?/g, '\n')
     .trim()
 }
+
+export function firebasePrivateKeyFromEnv(env: {
+  FIREBASE_ADMIN_PRIVATE_KEY?: string
+  FIREBASE_PRIVATE_KEY?: string
+}) {
+  return normalizeFirebasePrivateKey(env.FIREBASE_ADMIN_PRIVATE_KEY)
+    ?? normalizeFirebasePrivateKey(env.FIREBASE_PRIVATE_KEY)
+}

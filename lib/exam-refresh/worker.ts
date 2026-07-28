@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { FieldValue, Timestamp, type DocumentData, type QueryDocumentSnapshot } from 'firebase-admin/firestore'
+import type { DocumentData, QueryDocumentSnapshot, Timestamp as FirestoreTimestamp } from 'firebase-admin/firestore'
 import {
   EXAM_SECTIONS,
   ExamCycleDetailsSchema,
@@ -11,7 +11,11 @@ import {
   type ExamCycleDetails,
   type ExamSection,
 } from '@/lib/exam-information'
-import { adminDbCore } from '@/lib/firebase-admin-core'
+import {
+  adminDbCore,
+  adminFieldValueCore as FieldValue,
+  adminTimestampCore as Timestamp,
+} from '@/lib/firebase-admin-core'
 import { requestExamWebRefresh } from './openai-refresh'
 import { evidenceFromClaims, validateRefreshEvidence, type ExamWebRefresh } from './schema'
 
@@ -79,7 +83,7 @@ async function acquireLease(examId: string, id: string) {
   const ref = adminDbCore.collection('examRefreshLocks').doc(examId)
   return adminDbCore.runTransaction(async (transaction) => {
     const snapshot = await transaction.get(ref)
-    const leaseUntil = snapshot.data()?.leaseUntil as Timestamp | undefined
+    const leaseUntil = snapshot.data()?.leaseUntil as FirestoreTimestamp | undefined
     if (leaseUntil && leaseUntil.toMillis() > Date.now() && snapshot.data()?.runId !== id) return false
     transaction.set(ref, {
       examId,
@@ -339,4 +343,3 @@ export async function refreshExams(options: RefreshOptions): Promise<RefreshResu
   await finishRun(id, options, result)
   return result
 }
-

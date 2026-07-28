@@ -1,6 +1,5 @@
 import OpenAI from 'openai'
-import { FieldValue } from 'firebase-admin/firestore'
-import { adminAuth, adminDb } from '@/lib/firebase-admin'
+import { adminAuth, adminDb, FieldValue } from '@/lib/firebase-admin'
 import { cleanAliases, examCatalogId, normalizeExamKey, type ExamCatalogEntry } from '@/lib/exam-catalog'
 
 export const runtime = 'nodejs'

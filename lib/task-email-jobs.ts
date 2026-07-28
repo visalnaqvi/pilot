@@ -1,7 +1,6 @@
 import 'server-only'
 
-import { FieldValue, Timestamp } from 'firebase-admin/firestore'
-import { adminDb } from './firebase-admin'
+import { adminDb, FieldValue, Timestamp } from './firebase-admin'
 import { planTaskEmailJobs } from './task-email-plan'
 
 export async function ensureTaskEmailJobs(input: {
@@ -29,4 +28,3 @@ export async function ensureTaskEmailJobs(input: {
   })))
   return jobs
 }
-

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { normalizeFirebasePrivateKey } from '../lib/firebase-private-key'
+import { firebasePrivateKeyFromEnv, normalizeFirebasePrivateKey } from '../lib/firebase-private-key'
 
 const privateKey = [
   '-----BEGIN PRIVATE KEY-----',
@@ -23,4 +23,17 @@ test('private-key normalization preserves real multiline values', () => {
 test('private-key normalization treats blank values as missing', () => {
   assert.equal(normalizeFirebasePrivateKey('   '), undefined)
   assert.equal(normalizeFirebasePrivateKey(undefined), undefined)
+})
+
+test('private-key environment lookup accepts the Vercel fallback name', () => {
+  assert.equal(firebasePrivateKeyFromEnv({
+    FIREBASE_PRIVATE_KEY: privateKey.replace(/\n/g, '\\n'),
+  }), privateKey)
+})
+
+test('private-key environment lookup prefers the Firebase Admin name', () => {
+  assert.equal(firebasePrivateKeyFromEnv({
+    FIREBASE_ADMIN_PRIVATE_KEY: privateKey,
+    FIREBASE_PRIVATE_KEY: 'not-the-selected-value',
+  }), privateKey)
 })

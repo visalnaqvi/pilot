@@ -6,6 +6,12 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 Copy `.env.example` to `.env.local` and set the OpenAI API key plus Firebase Admin credentials. These values are used only by the protected exam-resolution route; do not expose them as `NEXT_PUBLIC_*` variables.
 
+For Vercel, set the service-account key as the complete `private_key` value.
+Both a real multiline value and a value containing literal `\n` separators are
+accepted. The preferred variable is `FIREBASE_ADMIN_PRIVATE_KEY`; the existing
+name `FIREBASE_PRIVATE_KEY` is also supported. Do not add a `NEXT_PUBLIC_`
+prefix.
+
 ### Task notification emails
 
 Task and assignment emails use SendGrid and a durable Firestore queue. Configure
