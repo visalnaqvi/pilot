@@ -8,7 +8,25 @@ export type QuestionContent = {
   optionImageUrls?: string[]
 }
 export type Question = QuestionContent & { marks: number }
+export type LearnerQuestion =
+  | {
+      kind: 'mcq'
+      prompt: string
+      options: string[]
+      marks: number
+      format?: QuestionFormat
+      promptImageUrl?: string
+      optionImageUrls?: string[]
+    }
+  | {
+      kind: 'short_answer'
+      prompt: string
+      marks: number
+      format?: QuestionFormat
+      promptImageUrl?: string
+    }
 export type QuestionBankItem = QuestionContent & {
+  kind?: 'mcq' | 'short_answer'
   id: string
   createdBy: string
   visibility: 'public' | 'private'
@@ -52,6 +70,8 @@ export type MockTest = {
   organisationId?: string
   deletedAt?: unknown | null
   deletedBy?: string | null
+  origin?: 'ai_generated'
+  generationJobId?: string
 }
 
 export type Submission = {
@@ -65,6 +85,10 @@ export type Submission = {
   testExamId?: string
   testCategory: string
   score: number
+  gradingStatus?: 'not_required' | 'pending' | 'graded'
+  mcqScore?: number
+  mcqMarks?: number
+  pendingMarks?: number
   totalMarks: number
   correctAnswers: number
   questionCount: number
@@ -82,11 +106,20 @@ export type Submission = {
 }
 
 export type SubmissionAnswer = {
+  kind?: 'mcq' | 'short_answer'
   questionIndex: number
   prompt: string
-  options: string[]
-  selectedAnswer: number | null
-  correctAnswer: number
-  isCorrect: boolean
+  options?: string[]
+  selectedAnswer?: number | null
+  correctAnswer?: number
+  isCorrect?: boolean
+  response?: string
+  modelAnswer?: string
+  rubric?: Array<{ criterion: string; marks: number }>
+  awardedMarks?: number
+  feedback?: string
+  gradingStatus?: 'pending' | 'graded'
+  explanation?: string
+  answerOrigin?: 'source_supported' | 'model_inferred'
   marks: number
 }

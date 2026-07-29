@@ -87,6 +87,7 @@ export function SubmissionsDashboard({ initialSubmissionId, initialUserId }: { i
     return (!testId || item.testId === testId) && (!exam || submissionExam(item) === exam) && (!category || submissionCategory(item) === category) && (!userId || item.userId === userId) && (!organisationId || item.organisationIds?.includes(organisationId)) && (!from || (date && date >= new Date(`${from}T00:00:00`))) && (!to || (date && date <= new Date(`${to}T23:59:59.999`)))
   }).sort((a, b) => {
     const scoreOf = (item: Submission) => item.totalMarks ? item.score / item.totalMarks : 0
+    if (sortBy !== 'newest' && (a.gradingStatus === 'pending') !== (b.gradingStatus === 'pending')) return a.gradingStatus === 'pending' ? 1 : -1
     if (sortBy === 'highest-score') return scoreOf(b) - scoreOf(a)
     if (sortBy === 'lowest-score') return scoreOf(a) - scoreOf(b)
     return (dateOf(b)?.getTime() ?? 0) - (dateOf(a)?.getTime() ?? 0)
@@ -150,7 +151,7 @@ function SubmissionCard({ submission, exam, openAnswers }: { submission: Submiss
         <span className="grid h-11 w-11 shrink-0 place-items-center rounded-full border border-indigo-100 bg-indigo-50 text-indigo-600"><UserIcon /></span>
         <div className="min-w-0"><p className="truncate font-bold text-slate-900">{submission.userName || submission.userEmail || submission.userId}</p><p className="mt-1 truncate text-sm text-slate-500">{submission.userEmail || submission.userId}</p></div>
       </div>
-      <div className="border-t border-slate-100 pt-5 lg:border-l lg:border-t-0 lg:px-5 lg:py-0"><ScoreDonut score={submission.score} total={submission.totalMarks} /></div>
+      <div className="border-t border-slate-100 pt-5 lg:border-l lg:border-t-0 lg:px-5 lg:py-0">{submission.gradingStatus === 'pending' ? <div className="rounded-xl bg-amber-50 p-3 text-center text-sm font-bold text-amber-800"><span className="block text-lg">{submission.mcqScore || 0}/{submission.mcqMarks || 0}</span>MCQ subtotal<br />{submission.pendingMarks || 0} marks pending</div> : <ScoreDonut score={submission.score} total={submission.totalMarks} />}</div>
       <div className="border-t border-slate-100 pt-5 text-sm text-slate-500 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
         <p className="flex items-center gap-2"><CalendarIcon />{formatDate(submission)}</p>
         <p className="mt-3 flex items-center gap-2"><CheckIcon />{submission.correctAnswers}/{submission.questionCount} correct</p>

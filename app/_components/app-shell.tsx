@@ -26,7 +26,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const roleLabel = role === 'organisation' ? 'Institute' : role
   const canManage = role === 'admin' || role === 'organisation'
   const organisationProfileId = profile?.uid || user.uid
-  const workPath = pathname === '/assignments' || pathname === '/tasks' || pathname === '/calendar'
+  const workPath = pathname === '/assignments' || pathname === '/tasks' || pathname === '/timetables' || pathname === '/calendar'
   const testPath = pathname === '/tests'
     || pathname.startsWith('/tests/')
     || pathname === '/manage/tests'
@@ -125,6 +125,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <div className="flex min-w-max gap-1 px-1">
                 {canManage && <Link href="/assignments" className={workspaceTab('/assignments')}>Assignments</Link>}
                 {(role === 'organisation' || role === 'user') && <Link href="/tasks" className={workspaceTab('/tasks')}>Tasks</Link>}
+                {(role === 'organisation' || role === 'user') && <Link href="/timetables" className={workspaceTab('/timetables')}>Timetables</Link>}
                 <Link href="/calendar" className={workspaceTab('/calendar')}>Calendar</Link>
               </div>
             </nav>
@@ -134,6 +135,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <nav aria-label="Test workspace" className="mb-7 overflow-x-auto border-b border-slate-200">
               <div className="flex min-w-max gap-1 px-1">
                 <Link href="/tests" className={workspaceTab('/tests')}>Tests</Link>
+                {canManage && <Link href="/manage/tests" className={workspaceTab('/manage/tests')}>Manage tests</Link>}
+                {canManage && <Link href="/manage/tests/generate" className={workspaceTab('/manage/tests/generate')}>AI generator</Link>}
                 <Link href="/submissions" className={workspaceTab('/submissions')}>Submissions</Link>
               </div>
             </nav>

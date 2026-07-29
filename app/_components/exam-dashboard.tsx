@@ -102,7 +102,7 @@ const source = role === 'admin' ? collection(db, 'organisationGroups') : query(c
 return onSnapshot(source, async s => { try { setGroups(await Promise.all(s.docs.map(async d => ({ id: d.id, name: d.data().name as string, targetExamId: d.data().targetExamId as string | undefined, targetExamName: d.data().targetExamName as string | undefined, members: (await getDocs(collection(d.ref, 'members'))).docs.map(m => ({ userId: m.data().userId as string })) })))) } catch { setError('Unable to load groups.') } }, e => setError(e.message)) }, [allowed, role, user])
   useEffect(() => { if (!user || !allowed) return;
 const source = role === 'admin' ? collection(db, 'submissions') : query(collection(db, 'submissions'), where('organisationIds', 'array-contains', user.uid));
-return onSnapshot(source, s => setSubmissions(s.docs.map(d => ({ id: d.id, ...d.data() }) as Submission)), e => setError(e.message)) }, [allowed, role, user])
+return onSnapshot(source, s => setSubmissions(s.docs.map(d => ({ id: d.id, ...d.data() }) as Submission).filter(item => item.gradingStatus !== 'pending')), e => setError(e.message)) }, [allowed, role, user])
   useEffect(() => { if (!user || !allowed) return;
 const source = role === 'admin' ? collection(db, 'testAssignments') : query(collection(db, 'testAssignments'), where('assignedBy', '==', user.uid));
 return onSnapshot(source, s => setAssignments(s.docs.map(d => ({ id: d.id, ...d.data() }) as TestAssignment)), e => setError(e.message)) }, [allowed, role, user])
@@ -506,7 +506,7 @@ export function TestDashboardModal({ test, close }: { test: MockTest; close: () 
       : profile.role === 'organisation'
         ? query(collection(db, 'submissions'), where('testId', '==', test.id), where('organisationIds', 'array-contains', user.uid))
         : query(collection(db, 'submissions'), where('testId', '==', test.id), where('userId', '==', user.uid))
-    return onSnapshot(source, snapshot => setSubmissions(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as Submission)), reason => setError(reason.message))
+    return onSnapshot(source, snapshot => setSubmissions(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as Submission).filter(item => item.gradingStatus !== 'pending')), reason => setError(reason.message))
   }, [profile, test.id, user])
   const [tab, setTab] = useState<ModalTab>('scores')
   const canEdit = profile?.role === 'admin' || (profile?.role === 'organisation' && test.createdBy === user?.uid)

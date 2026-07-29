@@ -33,7 +33,7 @@ export function OrganisationUsers() {
 
   useEffect(() => { if (!user || !allowed) return; return onSnapshot(query(collection(db, 'organisationInvites'), where('organisationId', '==', user.uid)), snapshot => setInvites(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as OrganisationInvite)), reason => setMessage(`Could not load invitations: ${reason.message}`)) }, [allowed, user])
   useEffect(() => { if (!user || !allowed) return; return onSnapshot(collection(db, 'users'), snapshot => setAccounts(snapshot.docs.map(item => ({ uid: item.id, ...item.data() }) as UserProfile).filter(account => account.role === 'user')), reason => setMessage(`Could not load users: ${reason.message}`)) }, [allowed, user])
-  useEffect(() => { if (!user || !allowed) return; return onSnapshot(query(collection(db, 'submissions'), where('organisationIds', 'array-contains', user.uid)), snapshot => setSubmissions(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as Submission)), reason => setMessage(`Could not load scores: ${reason.message}`)) }, [allowed, user])
+  useEffect(() => { if (!user || !allowed) return; return onSnapshot(query(collection(db, 'submissions'), where('organisationIds', 'array-contains', user.uid)), snapshot => setSubmissions(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as Submission).filter(item => item.gradingStatus !== 'pending')), reason => setMessage(`Could not load scores: ${reason.message}`)) }, [allowed, user])
   useEffect(() => {
     if (!user || !allowed) return
     return onSnapshot(query(collection(db, 'organisationGroups'), where('organisationId', '==', user.uid)), async snapshot => {

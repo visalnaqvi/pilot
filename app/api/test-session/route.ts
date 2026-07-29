@@ -114,7 +114,15 @@ async function resolveAssignment(
 }
 
 async function loadQuestions(testId: string, testData: FirebaseFirestore.DocumentData) {
-  if (Array.isArray(testData.questions)) return testData.questions
+  if (Array.isArray(testData.questions)) return testData.questions.map((content: FirebaseFirestore.DocumentData) => ({
+    kind: content.kind === 'short_answer' ? 'short_answer' : 'mcq',
+    prompt: content.prompt,
+    ...(content.kind === 'short_answer' ? {} : { options: content.options }),
+    promptImageUrl: content.promptImageUrl,
+    optionImageUrls: content.optionImageUrls,
+    format: content.format,
+    marks: Number(content.marks) || 1,
+  }))
   const memberships = await adminDb.collection('tests').doc(testId).collection('questions').orderBy('position').get()
   const sources = await Promise.all(memberships.docs.map(membership => {
     const questionId = membership.data().questionId
@@ -127,9 +135,9 @@ async function loadQuestions(testId: string, testData: FirebaseFirestore.Documen
     const content = sources[index]?.data() || membershipData.snapshot
     if (!content) return []
     return [{
+      kind: content.kind === 'short_answer' ? 'short_answer' : 'mcq',
       prompt: content.prompt,
-      options: content.options,
-      correctAnswer: content.correctAnswer,
+      ...(content.kind === 'short_answer' ? {} : { options: content.options }),
       promptImageUrl: content.promptImageUrl,
       optionImageUrls: content.optionImageUrls,
       format: content.format,

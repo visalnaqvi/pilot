@@ -12,6 +12,7 @@
     "lint": "eslint",
     "email:poll": "tsx scripts/task-email-poller.ts",
     "migrate:exam-catalog": "node scripts/migrate-exam-catalog.mjs",
+    "migrate:question-keys": "node scripts/migrate-question-keys.mjs",
     "exam:refresh": "tsx scripts/exam-cli.ts",
     "exam:cleanup-legacy": "tsx scripts/cleanup-legacy-exam-ingestion.ts",
     "test": "node --import tsx --test tests/*.test.ts",

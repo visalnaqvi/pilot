@@ -18,6 +18,11 @@ service cloud.firestore {
     }
     function hasExam(data) { return data.exam is string && data.exam.size() > 0 && data.examId is string && data.examId.size() > 0; }
     function hasCategory(data) { return data.category is string && data.category.size() > 0 && data.categoryId is string && data.categoryId.size() > 0; }
+    function hasNoAnswerKey(data) {
+      return !('correctAnswer' in data) && !('explanation' in data)
+        && !('modelAnswer' in data) && !('rubric' in data)
+        && !('answerOrigin' in data) && !('sourceReferences' in data);
+    }
     function organisationInvitePath(organisationId, userId) {
       let inviteId = organisationId + '_' + userId;
       return /databases/$(database)/documents/organisationInvites/$(inviteId);
@@ -378,9 +383,24 @@ service cloud.firestore {
 
     match /questions/{questionId} {
       allow get, list: if canReadQuestion();
-      allow create: if canCreateTests() && request.resource.data.createdBy == request.auth.uid && request.resource.data.visibility in ['public', 'private'] && (request.resource.data.visibility == 'public' || (isOrganisation() && request.resource.data.organisationId == request.auth.uid));
-      allow update: if canManageQuestion() && request.resource.data.createdBy == resource.data.createdBy && request.resource.data.visibility == resource.data.visibility && request.resource.data.organisationId == resource.data.organisationId;
+      allow create: if canCreateTests() && hasNoAnswerKey(request.resource.data) && request.resource.data.createdBy == request.auth.uid && request.resource.data.visibility in ['public', 'private'] && (request.resource.data.visibility == 'public' || (isOrganisation() && request.resource.data.organisationId == request.auth.uid));
+      allow update: if canManageQuestion() && hasNoAnswerKey(request.resource.data) && request.resource.data.createdBy == resource.data.createdBy && request.resource.data.visibility == resource.data.visibility && request.resource.data.organisationId == resource.data.organisationId;
       allow delete: if false;
+    }
+
+    match /questionKeys/{questionId} {
+      allow read, write: if false;
+    }
+
+    match /testGenerationJobs/{jobId} {
+      allow get, list: if isAdmin() || (isOrganisation() && resource.data.ownerId == request.auth.uid);
+      allow create, update, delete: if false;
+
+      match /{allPaths=**} {
+        allow read: if isAdmin() || (isOrganisation()
+          && get(/databases/$(database)/documents/testGenerationJobs/$(jobId)).data.ownerId == request.auth.uid);
+        allow write: if false;
+      }
     }
 
     match /tests/{testId} {
@@ -389,14 +409,15 @@ service cloud.firestore {
       // constrained query can only return allowed documents.
       allow list: if canListTest();
       allow get: if canReadTestById(testId) && canOpenTest(testId);
-      allow create: if canCreateTests() && hasExam(request.resource.data) && hasCategory(request.resource.data) && request.resource.data.published is bool && request.resource.data.createdBy == request.auth.uid && request.resource.data.deletedAt == null && request.resource.data.visibility in ['public', 'private', 'assigned'] && validTestAccessMode(request.resource.data);
-      allow update: if canManageTest(testId) && (!('exam' in resource.data) || hasExam(request.resource.data)) && (!('category' in resource.data) || hasCategory(request.resource.data)) && (!('published' in resource.data) || request.resource.data.published is bool) && ((resource.data.deletedAt != null && request.resource.data.deletedAt == null && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deletedAt', 'deletedBy'])) || (resource.data.deletedAt == null && request.resource.data.createdBy == resource.data.createdBy && (request.resource.data.deletedAt == null || request.resource.data.deletedBy == request.auth.uid) && request.resource.data.visibility in ['public', 'private', 'assigned'] && validTestAccessMode(request.resource.data)));
+      allow create: if canCreateTests() && !('questions' in request.resource.data) && hasExam(request.resource.data) && hasCategory(request.resource.data) && request.resource.data.published is bool && request.resource.data.createdBy == request.auth.uid && request.resource.data.deletedAt == null && request.resource.data.visibility in ['public', 'private', 'assigned'] && validTestAccessMode(request.resource.data);
+      allow update: if canManageTest(testId) && !('questions' in request.resource.data) && (!('exam' in resource.data) || hasExam(request.resource.data)) && (!('category' in resource.data) || hasCategory(request.resource.data)) && (!('published' in resource.data) || request.resource.data.published is bool) && ((resource.data.deletedAt != null && request.resource.data.deletedAt == null && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deletedAt', 'deletedBy'])) || (resource.data.deletedAt == null && request.resource.data.createdBy == resource.data.createdBy && (request.resource.data.deletedAt == null || request.resource.data.deletedBy == request.auth.uid) && request.resource.data.visibility in ['public', 'private', 'assigned'] && validTestAccessMode(request.resource.data)));
       allow delete: if false;
 
       match /questions/{membershipId} {
         allow read: if canReadTestById(testId) && canOpenTest(testId);
-        allow create: if canCreateMembership(testId);
-        allow update, delete: if canManageTest(testId);
+        allow create: if canCreateMembership(testId) && (!('snapshot' in request.resource.data) || hasNoAnswerKey(request.resource.data.snapshot));
+        allow update: if canManageTest(testId) && (!('snapshot' in request.resource.data) || hasNoAnswerKey(request.resource.data.snapshot));
+        allow delete: if canManageTest(testId);
       }
     }
 
@@ -414,11 +435,32 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    match /timetableDrafts/{timetableId} {
+      allow get, list: if signedIn() && (isAdmin()
+        || (isOrganisation() && resource.data.organisationId == request.auth.uid));
+      allow create, update, delete: if false;
+    }
+
+    match /timetables/{timetableId} {
+      allow get, list: if signedIn() && (isAdmin()
+        || (isOrganisation() && resource.data.organisationId == request.auth.uid)
+        || request.auth.uid in resource.data.assignedUserIds);
+      allow create, update, delete: if false;
+    }
+
     match /taskEmailJobs/{jobId} {
       allow read, write: if false;
     }
 
     match /taskEmailDeliveries/{deliveryId} {
+      allow read, write: if false;
+    }
+
+    match /timetableEmailJobs/{jobId} {
+      allow read, write: if false;
+    }
+
+    match /timetableEmailDeliveries/{deliveryId} {
       allow read, write: if false;
     }
 
@@ -430,17 +472,16 @@ service cloud.firestore {
 
     match /submissions/{submissionId} {
       allow get, list: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin() || (isOrganisation() && request.auth.uid in resource.data.organisationIds));
-      allow create: if signedIn() && request.resource.data.userId == request.auth.uid && request.resource.data.testId is string && request.resource.data.userEmail == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.email && request.resource.data.testTitle is string && request.resource.data.testCategory is string && request.resource.data.score is number && request.resource.data.totalMarks is number && request.resource.data.correctAnswers is number && request.resource.data.questionCount is number && request.resource.data.answers is list && request.resource.data.organisationIds is list && request.resource.data.attemptNumber is int && request.resource.data.attemptNumber > 0 && request.resource.data.autoSubmitted is bool && request.resource.data.submittedAt == request.time
-        && ((get(/databases/$(database)/documents/tests/$(request.resource.data.testId)).data.visibility == 'public' && request.resource.data.testVisibility == 'public')
-          || validPrivateSubmission(request.resource.data.testId, request.resource.data)
-          || validAssignedSubmission(request.resource.data.testId, submissionId, request.resource.data));
-      allow update, delete: if false;
+      allow create, update, delete: if false;
+    }
+
+    match /submissionGrading/{submissionId} {
+      allow read, write: if false;
     }
 
     match /organisationSubmissions/{submissionId} {
       allow get, list: if isAdmin() || (isOrganisation() && resource.data.organisationId == request.auth.uid);
-      allow create: if signedIn() && request.resource.data.userId == request.auth.uid && request.resource.data.organisationId is string && exists(organisationInvitePath(request.resource.data.organisationId, request.auth.uid)) && get(organisationInvitePath(request.resource.data.organisationId, request.auth.uid)).data.status == 'accepted';
-      allow update, delete: if false;
+      allow create, update, delete: if false;
     }
   }
 }

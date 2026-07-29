@@ -43,7 +43,7 @@ Options:
   --help                 Show this help.
 
 Environment:
-  TASK_EMAIL_CRON_URL       Full production task-email cron endpoint.
+  TASK_EMAIL_CRON_URL       Full production email-queue cron endpoint.
   CRON_SECRET               Secret matching the Vercel environment variable.
   TASK_EMAIL_POLL_INTERVAL  Optional default interval; CLI --interval wins.`
 
@@ -200,7 +200,7 @@ export async function pollTaskEmailQueue(
       logError(`[${now().toISOString()}] Email queue poll failed: HTTP ${response.status}${body ? ` — ${body}` : ''}`)
       return 'failed'
     }
-    log(`[${now().toISOString()}] Email queue processed${body ? `: ${body}` : '.'}`)
+    log(`[${now().toISOString()}] Task and timetable email queues processed${body ? `: ${body}` : '.'}`)
     return 'success'
   } catch (error) {
     if (signal?.aborted) return 'aborted'
@@ -259,7 +259,7 @@ export async function main(argv = process.argv.slice(2)) {
 
   try {
     if (!options.once) {
-      console.log(`Email poller started. Polling every ${formatPollInterval(options.intervalMilliseconds)}; press Ctrl+C to stop.`)
+      console.log(`Task and timetable email poller started. Polling every ${formatPollInterval(options.intervalMilliseconds)}; press Ctrl+C to stop.`)
     }
     const result = await runTaskEmailPoller(options, config, controller.signal)
     if (options.once && result.failures) process.exitCode = 1

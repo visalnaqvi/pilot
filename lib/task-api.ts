@@ -27,6 +27,20 @@ async function userProfiles(userIds: string[]) {
     .map(snapshot => [snapshot.id, snapshot.data()!]))
 }
 
+export async function resolveUserRecipients(userIds: string[]) {
+  const ids = unique(userIds)
+  const profiles = await userProfiles(ids)
+  return ids.flatMap(userId => {
+    const profile = profiles.get(userId)
+    if (!profile || profile.role !== 'user' || typeof profile.email !== 'string') return []
+    return [{
+      userId,
+      userName: String(profile.name || profile.email),
+      userEmail: String(profile.email),
+    }]
+  })
+}
+
 async function assertAcceptedMembers(organisationId: string, userIds: string[]) {
   const ids = unique(userIds)
   if (!ids.length) return
@@ -128,4 +142,3 @@ export async function resolveAssignmentAudience(input: {
   if (input.targetType === 'user') audienceName = assignees[0].userName
   return { assignees, audienceName }
 }
-

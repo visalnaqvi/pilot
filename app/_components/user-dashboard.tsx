@@ -61,6 +61,7 @@ export function UserDashboard() {
       query(collection(db, 'submissions'), where('userId', '==', user.uid)),
       snapshot => setSubmissions(snapshot.docs
         .map(item => ({ id: item.id, ...item.data() }) as Submission)
+        .filter(item => item.gradingStatus !== 'pending')
         .sort((a, b) => (submittedAt(b)?.getTime() || 0) - (submittedAt(a)?.getTime() || 0))),
       reason => setError(reason.message),
     )

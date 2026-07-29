@@ -49,7 +49,8 @@ test('Firebase token verification rejects expired tokens', () => {
 
 test('Firebase token verification rejects a modified signature', () => {
   const value = token()
-  const modified = `${value.slice(0, -1)}${value.endsWith('A') ? 'B' : 'A'}`
+  const [header, payload, signature] = value.split('.')
+  const modified = `${header}.${payload}.${signature.startsWith('A') ? 'B' : 'A'}${signature.slice(1)}`
   assert.throws(
     () => verifyFirebaseIdTokenWithCertificates(modified, projectId, { [keyId]: publicKeyPem }, now),
     /signature/,

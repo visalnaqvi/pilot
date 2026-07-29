@@ -12,9 +12,38 @@ accepted. The preferred variable is `FIREBASE_ADMIN_PRIVATE_KEY`; the existing
 name `FIREBASE_PRIVATE_KEY` is also supported. Do not add a `NEXT_PUBLIC_`
 prefix.
 
-### Task notification emails
+### AI test generation
 
-Task and assignment emails use SendGrid and a durable Firestore queue. Configure
+Uploaded-material generation uses three background OpenAI Responses: analysis,
+question generation, and independent verification. Configure these server-only
+variables:
+
+```bash
+OPENAI_API_KEY=
+OPENAI_TEST_GENERATION_MODEL=gpt-5.6-terra
+OPENAI_WEBHOOK_SECRET=
+AI_TEST_GENERATION_ENABLED=true
+```
+
+Create an OpenAI project webhook for
+`https://your-domain.example/api/openai/webhooks` and subscribe it to response
+completed, failed, incomplete, and cancelled events. The webhook signing secret
+must exactly match `OPENAI_WEBHOOK_SECRET`. Deploy `firestore.rules`,
+`storage.rules`, and `firestore.indexes.json` before enabling the feature.
+
+Existing inline question keys can be audited and migrated to the private
+`questionKeys` collection with:
+
+```bash
+npm run migrate:question-keys
+npm run migrate:question-keys -- --write
+```
+
+The first command is a dry run. Back up Firestore before using `--write`.
+
+### Task and timetable notification emails
+
+Task, assignment, and timetable emails use SendGrid and durable Firestore queues. Configure
 these server-only variables locally and in Vercel:
 
 ```bash
@@ -32,8 +61,10 @@ least 16 characters. Never expose either secret through a `NEXT_PUBLIC_`
 variable.
 
 Task and assignment creation requests immediately process their `assigned`
-email on Vercel. Time-based start, reminder, ended, and failed-delivery retry
-jobs remain in Firestore until a worker checks the queue.
+email on Vercel. Timetables do not send email when they are created, edited,
+published, or archived; students receive only the consolidated 7:00 AM agenda
+on class days. Time-based task messages, timetable agendas, and failed-delivery
+retries remain in Firestore until a worker checks the queues.
 
 Vercel Hobby does not support a cron that runs more than once per day. To poll
 the production queue from a local machine, add the following to the ignored
@@ -55,7 +86,7 @@ npm run email:poll -- --interval 1h
 npm run email:poll -- --once
 ```
 
-The poller checks once immediately, then waits after each request so calls do
+The poller checks both task and timetable queues once immediately, then waits after each request so calls do
 not overlap. Temporary failures are logged and retried on the next interval.
 Press `Ctrl+C` to stop it. Closing the terminal, shutting down the computer, or
 losing internet access pauses processing; due jobs stay queued and are handled

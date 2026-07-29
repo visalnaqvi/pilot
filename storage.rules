@@ -28,6 +28,18 @@ service firebase.storage {
       allow write: if canCreateTests() && request.auth.uid == userId && request.resource.size < 5 * 1024 * 1024 && request.resource.contentType.matches('image/.*');
     }
 
+    match /test-generation-sources/{organisationId}/{jobId}/{allPaths=**} {
+      allow read: if isAdmin() || (isOrganisation() && request.auth.uid == organisationId
+        && firestore.get(/databases/(default)/documents/testGenerationJobs/$(jobId)).data.ownerId == request.auth.uid);
+      allow create: if isOrganisation()
+        && request.auth.uid == organisationId
+        && firestore.get(/databases/(default)/documents/testGenerationJobs/$(jobId)).data.ownerId == request.auth.uid
+        && request.resource.size <= 20 * 1024 * 1024
+        && request.resource.contentType.matches('(application/pdf|application/msword|application/vnd.openxmlformats-officedocument.wordprocessingml.document|application/rtf|text/rtf|application/vnd.oasis.opendocument.text|application/octet-stream|text/plain|text/markdown|image/png|image/jpeg|image/webp|image/gif)');
+      allow update: if false;
+      allow delete: if isAdmin() || (isOrganisation() && request.auth.uid == organisationId);
+    }
+
     match /organisation-profiles/{organisationId}/{imageName} {
       allow read: if signedIn();
       allow create, update: if isOrganisation()
