@@ -1,6 +1,7 @@
 import 'server-only'
 
 import type { Timestamp as FirestoreTimestamp } from 'firebase-admin/firestore'
+import { appBaseUrl } from './app-url'
 import { adminDb, FieldValue, Timestamp } from './firebase-admin'
 import { isEmailConfigured, sendEmail } from './email'
 import { isEmailAddress } from './task-email-content'
@@ -53,8 +54,7 @@ const leaseMilliseconds = 3 * 60_000
 const maxDeliveryAttempts = 5
 
 function actionUrl() {
-  const base = (process.env.APP_BASE_URL || 'http://localhost:3000').replace(/\/+$/, '')
-  return `${base}/timetables`
+  return `${appBaseUrl()}/timetables`
 }
 
 function sanitizeError(error: unknown) {

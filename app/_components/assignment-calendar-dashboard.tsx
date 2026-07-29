@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import FullCalendar from '@fullcalendar/react'
 import dayGridPlugin from '@fullcalendar/daygrid'
@@ -68,6 +68,7 @@ export function AssignmentCalendarDashboard() {
   const [eventFilter, setEventFilter] = useState<CalendarEventFilter>('all')
   const [message, setMessage] = useState('')
   const [now, setNow] = useState(() => Date.now())
+  const calendarRef = useRef<FullCalendar>(null)
 
   useEffect(() => {
     if (!user || !manager) return
@@ -111,6 +112,13 @@ export function AssignmentCalendarDashboard() {
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60_000)
     return () => window.clearInterval(timer)
+  }, [])
+  useEffect(() => {
+    const compact = window.matchMedia('(max-width: 639px)')
+    const syncView = () => calendarRef.current?.getApi().changeView(compact.matches ? 'timeGridDay' : 'timeGridWeek')
+    syncView()
+    compact.addEventListener('change', syncView)
+    return () => compact.removeEventListener('change', syncView)
   }, [])
 
   if (!manager && !learner) return <section><h1 className="text-3xl font-black">Access denied</h1></section>
@@ -183,6 +191,7 @@ export function AssignmentCalendarDashboard() {
     {message && <p className="mt-3 rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{message}</p>}
     <section className="assignment-calendar mt-4 min-h-0 flex-1 rounded-2xl border border-slate-200 bg-white p-3 shadow-[0_14px_40px_rgb(15_23_42/0.08)] sm:p-5">
       <FullCalendar
+        ref={calendarRef}
         plugins={[dayGridPlugin, timeGridPlugin, interactionPlugin]}
         initialView="timeGridWeek"
         headerToolbar={{ left: 'prev,next today', center: 'title', right: 'dayGridMonth,timeGridWeek,timeGridDay' }}

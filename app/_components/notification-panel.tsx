@@ -456,7 +456,7 @@ export function NotificationPanel() {
       {unreadCount > 0 && <span className="absolute -right-1.5 -top-1.5 grid min-h-5 min-w-5 place-items-center rounded-full bg-rose-500 px-1 text-[10px] font-black text-white ring-2 ring-white">{unreadCount > 9 ? '9+' : unreadCount}</span>}
     </button>
 
-    {open && <section aria-label="Notifications" className="absolute right-0 top-12 z-50 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-300/60">
+    {open && <section aria-label="Notifications" className="notification-popover absolute right-0 top-12 z-50 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-300/60">
       <header className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
         <div><h2 className="font-black text-slate-950">Notifications</h2><p className="mt-0.5 text-xs text-slate-500">{unreadCount ? `${unreadCount} unread` : 'You’re all caught up'}</p></div>
         {unreadCount > 0 && <button type="button" onClick={markAllRead} className="text-xs font-bold text-indigo-700 hover:underline">Mark all read</button>}

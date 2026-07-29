@@ -1,6 +1,7 @@
 import 'server-only'
 
 import type { DocumentData, DocumentReference, Timestamp as FirestoreTimestamp } from 'firebase-admin/firestore'
+import { appBaseUrl } from './app-url'
 import { adminDb, FieldValue, Timestamp } from './firebase-admin'
 import { isEmailConfigured, sendEmail } from './email'
 import { buildTaskEmail, isEmailAddress } from './task-email-content'
@@ -60,11 +61,10 @@ function timestampDate(value?: FirestoreTimestamp | null) {
 }
 
 function actionUrl(task: TaskData) {
-  const base = (process.env.APP_BASE_URL || 'http://localhost:3000').replace(/\/+$/, '')
   const path = task.sourceType === 'assignment' && task.linkedTestId
     ? `/tests/${encodeURIComponent(task.linkedTestId)}${task.linkedAssignmentBatchId ? `?assignment=${encodeURIComponent(task.linkedAssignmentBatchId)}` : ''}`
     : '/tasks'
-  return `${base}${path}`
+  return `${appBaseUrl()}${path}`
 }
 
 async function settleSkippedDelivery(

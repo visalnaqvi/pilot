@@ -13,6 +13,34 @@
 body {
   background: var(--background);
   color: var(--foreground);
+  min-width: 0;
+  overflow-x: clip;
+}
+
+img,
+video,
+canvas {
+  max-width: 100%;
+  height: auto;
+}
+
+input,
+select,
+textarea {
+  min-width: 0;
+  max-width: 100%;
+}
+
+pre,
+.katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+[class*="overflow-x-auto"] {
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
 }
 
 /* Modal tables and cards use the same subtle divider treatment as the dashboard. */
@@ -77,6 +105,15 @@ form > div[aria-hidden="true"].pointer-events-none { display: none !important; }
   font-weight: 700;
   color: #fff;
   box-shadow: 0 8px 18px rgb(79 70 229 / 20%);
+}
+
+.assignment-form-header {
+  flex-wrap: wrap;
+}
+
+.assignment-form-header > div {
+  min-width: 0;
+  flex: 1 1 14rem;
 }
 
 .assignment-calendar .fc {
@@ -320,5 +357,116 @@ form > div[aria-hidden="true"].pointer-events-none { display: none !important; }
 
   .assignment-calendar .fc .fc-col-header-cell-cushion {
     font-size: 0.65rem;
+  }
+}
+
+@media (max-width: 639px) {
+  main h1.text-4xl,
+  main h1.text-5xl {
+    font-size: 1.875rem;
+    line-height: 2.25rem;
+    overflow-wrap: anywhere;
+  }
+
+  main h2.text-3xl,
+  [role="dialog"] h2.text-3xl {
+    font-size: 1.5rem;
+    line-height: 2rem;
+    overflow-wrap: anywhere;
+  }
+
+  main section,
+  main article,
+  main form,
+  [role="dialog"] section,
+  [role="dialog"] article,
+  [role="dialog"] form {
+    min-width: 0;
+  }
+
+  [role="dialog"] {
+    align-items: end;
+    padding: 0.5rem !important;
+  }
+
+  [role="dialog"] > form,
+  [role="dialog"] > section,
+  [role="dialog"] > div {
+    width: 100%;
+    max-height: calc(100dvh - 1rem) !important;
+    border-radius: 1rem;
+  }
+
+  [role="dialog"] > form > header,
+  [role="dialog"] > div > header,
+  [role="dialog"] > div > div:first-child,
+  [role="dialog"] > section > div:first-child {
+    flex-wrap: wrap;
+    padding: 1rem;
+  }
+
+  [role="dialog"] .p-5,
+  [role="dialog"] .p-6,
+  [role="dialog"] .p-7,
+  [role="dialog"] .p-8,
+  [role="dialog"] .p-10 {
+    padding: 1rem;
+  }
+
+  [role="dialog"] footer {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 0.875rem 1rem;
+  }
+
+  [role="dialog"] footer > div {
+    display: grid;
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  [role="dialog"] footer button {
+    min-height: 2.75rem;
+    padding-inline: 0.75rem;
+  }
+
+  .assignment-toggle {
+    flex: 1 0 100%;
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .notification-popover {
+    position: fixed;
+    top: 4.5rem;
+    right: 0.5rem;
+    left: 0.5rem;
+    width: auto;
+    max-height: calc(100dvh - 8rem);
+  }
+
+  .assignment-calendar {
+    min-height: 32rem;
+  }
+
+  .assignment-calendar .fc .fc-toolbar-title {
+    font-size: 0.95rem;
+    text-align: center;
+  }
+
+  .assignment-calendar .fc .fc-button {
+    padding: 0.45rem 0.55rem;
+  }
+
+  .assignment-calendar .fc .fc-button-group .fc-button {
+    min-width: 2.75rem;
+  }
+
+  .assignment-calendar .fc .fc-event {
+    font-size: 0.65rem;
+  }
+
+  .timetable-preview-calendar {
+    min-width: 42rem;
   }
 }

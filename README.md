@@ -55,6 +55,11 @@ APP_TIME_ZONE=Asia/Kolkata
 CRON_SECRET=
 ```
 
+On Vercel, notification links prefer the platform-provided
+`VERCEL_PROJECT_PRODUCTION_URL`, which resolves to the shortest configured
+production custom domain. `APP_BASE_URL` is the fallback for local and
+non-Vercel deployments.
+
 `EMAIL_FROM_ADDRESS` must be a verified SendGrid sender or belong to an
 authenticated sending domain. Generate `CRON_SECRET` as a random value of at
 least 16 characters. Never expose either secret through a `NEXT_PUBLIC_`

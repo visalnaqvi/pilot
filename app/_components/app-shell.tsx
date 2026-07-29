@@ -13,10 +13,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { user, profile, actualProfile, ready, isImpersonating, stopImpersonating } = useAuth()
   const router = useRouter()
   const pathname = usePathname()
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
   useEffect(() => {
     if (ready && !user) router.replace('/login')
   }, [ready, router, user])
+  useEffect(() => {
+    if (!mobileMenuOpen) return
+    const previousOverflow = document.body.style.overflow
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileMenuOpen(false)
+    }
+    document.body.style.overflow = 'hidden'
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [mobileMenuOpen])
 
   if (!ready || !user) {
     return <main className="grid min-h-screen place-items-center text-slate-500">Loading MockPilot…</main>
@@ -43,10 +57,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       ? '/admin/exam-updates'
       : '/invitations'
 
-  const navClass = (active: boolean) => `rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+  const navClass = (active: boolean) => `inline-flex shrink-0 items-center justify-center whitespace-nowrap rounded-lg px-2 py-2 text-xs font-semibold transition-colors sm:px-3 sm:text-sm ${
     active ? 'bg-indigo-100 text-indigo-800' : 'text-indigo-700 hover:bg-indigo-50'
   }`
-  const workspaceTab = (path: string) => `relative -mb-px flex shrink-0 items-center gap-3 rounded-t-xl border px-4 py-3 text-sm font-bold transition-colors ${
+  const workspaceTab = (path: string) => `relative -mb-px flex shrink-0 items-center gap-2 rounded-t-xl border px-3 py-2.5 text-xs font-bold transition-colors sm:gap-3 sm:px-4 sm:py-3 sm:text-sm ${
     pathname === path
       ? 'z-10 border-slate-200 border-b-white bg-white text-indigo-700 shadow-[0_-2px_8px_rgb(15_23_42/0.04)]'
       : 'border-transparent text-slate-500 hover:bg-white/70 hover:text-slate-900'
@@ -56,7 +70,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     <main className="min-h-screen bg-slate-50 text-slate-900">
       {!isTakingTest && (
         <header className="border-b border-slate-200 bg-white">
-          <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-5 py-4">
+          <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-3 py-3 sm:px-5 sm:py-4">
             <div className="flex items-center gap-3">
               <Link href="/dashboard" className="text-xl font-black tracking-tight text-indigo-600">MOCKPILOT</Link>
               <span className="hidden rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold capitalize text-slate-600 sm:inline">
@@ -64,23 +78,50 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </span>
             </div>
 
-            <nav aria-label="Primary navigation" className="flex w-full items-center justify-end gap-1 sm:w-auto sm:gap-2">
-              <Link href="/dashboard" className={navClass(pathname === '/dashboard')}>Dashboard</Link>
-              <Link href={workHref} className={navClass(workPath)}>Work</Link>
-              <Link href="/tests" className={navClass(testPath)}>Tests</Link>
-              {(role === 'organisation' || role === 'admin' || role === 'user') && (
+            <div className="flex items-center gap-2">
+              <nav aria-label="Primary navigation" className="hidden items-center justify-end gap-2 sm:flex">
+                <Link href="/dashboard" className={navClass(pathname === '/dashboard')}>Dashboard</Link>
+                <Link href={workHref} className={navClass(workPath)}>Work</Link>
+                <Link href="/tests" className={navClass(testPath)}>Tests</Link>
                 <Link href={manageHref} className={navClass(managePath)}>
                   {role === 'user' ? 'Invitations' : 'Manage'}
                 </Link>
-              )}
+              </nav>
               <NotificationPanel />
-              <AccountMenu
-                email={profile?.email || user.email || ''}
-                name={profile?.name || profile?.email || user.email || roleLabel}
-                profileHref={role === 'organisation' ? `/organisations/${organisationProfileId}` : undefined}
-              />
-            </nav>
+              <div className="hidden sm:block">
+                <AccountMenu
+                  email={profile?.email || user.email || ''}
+                  name={profile?.name || profile?.email || user.email || roleLabel}
+                  profileHref={role === 'organisation' ? `/organisations/${organisationProfileId}` : undefined}
+                />
+              </div>
+              <button
+                type="button"
+                aria-label={mobileMenuOpen ? 'Close navigation menu' : 'Open navigation menu'}
+                aria-controls="mobile-navigation"
+                aria-expanded={mobileMenuOpen}
+                onClick={() => setMobileMenuOpen(open => !open)}
+                className="grid h-10 w-10 place-items-center rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 sm:hidden"
+              >
+                <MenuIcon open={mobileMenuOpen} />
+              </button>
+            </div>
           </div>
+          {mobileMenuOpen && (
+            <MobileNavigation
+              pathname={pathname}
+              workHref={workHref}
+              workActive={workPath}
+              testsActive={testPath}
+              manageHref={manageHref}
+              manageActive={managePath}
+              manageLabel={role === 'user' ? 'Invitations' : 'Manage'}
+              email={profile?.email || user.email || ''}
+              name={profile?.name || profile?.email || user.email || roleLabel}
+              profileHref={role === 'organisation' ? `/organisations/${organisationProfileId}` : undefined}
+              close={() => setMobileMenuOpen(false)}
+            />
+          )}
         </header>
       )}
 
@@ -114,7 +155,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       >
         <div
           key={profile?.uid || 'account'}
-          className={`mx-auto max-w-7xl px-5 py-10 ${
+          className={`mx-auto min-w-0 max-w-7xl px-3 py-6 sm:px-5 sm:py-10 ${
             isImpersonating ? '[&_button]:cursor-not-allowed [&_input]:cursor-not-allowed [&_select]:cursor-not-allowed' : ''
           }`}
         >
@@ -164,6 +205,62 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
       </fieldset>
     </main>
+  )
+}
+
+function MobileNavigation({
+  pathname,
+  workHref,
+  workActive,
+  testsActive,
+  manageHref,
+  manageActive,
+  manageLabel,
+  email,
+  name,
+  profileHref,
+  close,
+}: {
+  pathname: string
+  workHref: string
+  workActive: boolean
+  testsActive: boolean
+  manageHref: string
+  manageActive: boolean
+  manageLabel: string
+  email: string
+  name: string
+  profileHref?: string
+  close: () => void
+}) {
+  const itemClass = (active: boolean) => `flex items-center justify-between rounded-xl px-4 py-3 text-sm font-bold ${
+    active ? 'bg-indigo-50 text-indigo-700' : 'text-slate-700 hover:bg-slate-100'
+  }`
+  return (
+    <div className="fixed inset-0 z-[70] sm:hidden">
+      <button type="button" aria-label="Close navigation menu" onClick={close} className="absolute inset-0 bg-slate-950/45" />
+      <aside id="mobile-navigation" aria-label="Mobile navigation" className="absolute right-0 top-0 flex h-dvh w-[min(20rem,88vw)] flex-col bg-white p-4 shadow-2xl">
+        <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-2 pb-4">
+          <div className="min-w-0">
+            <p className="truncate font-black text-slate-950">{name}</p>
+            {email && email !== name && <p className="mt-1 truncate text-xs text-slate-500">{email}</p>}
+          </div>
+          <button type="button" aria-label="Close navigation menu" onClick={close} className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-slate-300 text-slate-700">
+            <MenuIcon open />
+          </button>
+        </div>
+        <nav aria-label="Mobile primary navigation" className="mt-4 space-y-1">
+          <Link href="/dashboard" onClick={close} className={itemClass(pathname === '/dashboard')}>Dashboard <span aria-hidden="true">›</span></Link>
+          <Link href={workHref} onClick={close} className={itemClass(workActive)}>Work <span aria-hidden="true">›</span></Link>
+          <Link href="/tests" onClick={close} className={itemClass(testsActive)}>Tests <span aria-hidden="true">›</span></Link>
+          <Link href={manageHref} onClick={close} className={itemClass(manageActive)}>{manageLabel} <span aria-hidden="true">›</span></Link>
+        </nav>
+        <div className="mt-auto space-y-1 border-t border-slate-200 pt-4">
+          {profileHref && <Link href={profileHref} onClick={close} className="flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-100"><UserIcon />Profile</Link>}
+          <button type="button" onClick={() => { close(); void signOut(auth) }} className="flex w-full items-center gap-3 rounded-xl px-4 py-3 text-left text-sm font-bold text-rose-700 hover:bg-rose-50"><SignOutIcon />Sign out</button>
+        </div>
+      </aside>
+    </div>
   )
 }
 
@@ -251,6 +348,18 @@ function AccountMenu({
         </div>
       )}
     </div>
+  )
+}
+
+function MenuIcon({ open }: { open: boolean }) {
+  return open ? (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <path d="m6 6 12 12M18 6 6 18" />
+    </svg>
+  ) : (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <path d="M4 7h16M4 12h16M4 17h16" />
+    </svg>
   )
 }
 

@@ -1,6 +1,6 @@
 'use client'
 
-import { Children, FormEvent, isValidElement, useEffect, useMemo, useState } from 'react'
+import { Children, FormEvent, isValidElement, useEffect, useMemo, useRef, useState } from 'react'
 import { collection, doc, getDoc, getDocs, onSnapshot, query, where } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
 import { useAuth, type UserProfile } from './auth-context'
@@ -36,6 +36,7 @@ export function AssignmentsDashboard() {
   const [message, setMessage] = useState('')
   const [saving, setSaving] = useState(false)
   const [page, setPage] = useState(1)
+  const assignmentActionRef = useRef<HTMLButtonElement | null>(null)
 
   useEffect(() => { if (!user || !allowed) return; const source = role === 'admin' ? query(collection(db, 'tests'), where('visibility', '==', 'assigned')) : query(collection(db, 'tests'), where('createdBy', '==', user.uid), where('visibility', '==', 'assigned'), where('deletedAt', '==', null)); return onSnapshot(source, snapshot => setTests(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as MockTest).filter(test => test.deletedAt == null && test.published !== false)), reason => setMessage(reason.message)) }, [allowed, role, user])
   useEffect(() => { const openDatePicker = (event: MouseEvent) => { const input = event.target instanceof HTMLInputElement && event.target.type === 'datetime-local' ? event.target : null; input?.showPicker?.() }; document.addEventListener('click', openDatePicker); return () => document.removeEventListener('click', openDatePicker) }, [])
@@ -49,8 +50,9 @@ export function AssignmentsDashboard() {
     const bottomSubmit = footer?.querySelector('button:not([type])') as HTMLButtonElement | null
     const action = document.createElement('button')
     action.type = 'button'
-    action.className = 'assignment-toggle'
-    Object.assign(action.style, { marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: '0.5rem', borderRadius: '0.75rem', background: '#4f46e5', padding: '0.75rem 1rem', fontSize: '0.875rem', fontWeight: '700', color: '#fff', boxShadow: '0 8px 18px rgb(79 70 229 / 20%)' })
+    action.className = 'assignment-toggle disabled:cursor-wait disabled:opacity-70'
+    header.classList.add('assignment-form-header')
+    Object.assign(action.style, { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', borderRadius: '0.75rem', background: '#4f46e5', padding: '0.75rem 1rem', fontSize: '0.875rem', fontWeight: '700', color: '#fff', boxShadow: '0 8px 18px rgb(79 70 229 / 20%)' })
     const setAction = (mode: 'create' | 'send') => { action.dataset.mode = mode; action.innerHTML = mode === 'create' ? '<svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></svg><span>Create assignment</span>' : '<svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg><span>Send assignment</span>' }
     const collapse = () => { content.forEach(element => { element.style.display = 'none' }); header.style.borderBottom = 'none'; header.style.paddingBottom = '0'; setAction('create') }
     const expand = () => { content.forEach(element => { element.style.display = '' }); header.style.borderBottom = ''; header.style.paddingBottom = ''; if (bottomSubmit) bottomSubmit.style.display = 'none'; setAction('send') }
@@ -58,10 +60,24 @@ export function AssignmentsDashboard() {
     action.addEventListener('click', handleAction)
     cancel?.addEventListener('click', collapse)
     header.appendChild(action)
+    assignmentActionRef.current = action
     if (bottomSubmit) bottomSubmit.style.display = 'none'
     collapse()
-    return () => { action.removeEventListener('click', handleAction); cancel?.removeEventListener('click', collapse); action.remove() }
+    return () => { action.removeEventListener('click', handleAction); cancel?.removeEventListener('click', collapse); action.remove(); header.classList.remove('assignment-form-header'); assignmentActionRef.current = null }
   }, [])
+  useEffect(() => {
+    const action = assignmentActionRef.current
+    if (!action) return
+    action.disabled = saving
+    action.setAttribute('aria-busy', String(saving))
+    if (saving) {
+      action.dataset.idleContent = action.innerHTML
+      action.innerHTML = '<svg aria-hidden="true" class="animate-spin" viewBox="0 0 24 24" width="16" height="16" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3" opacity=".3"/><path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg><span>Sending assignment…</span>'
+    } else if (action.dataset.idleContent) {
+      action.innerHTML = action.dataset.idleContent
+      delete action.dataset.idleContent
+    }
+  }, [saving])
   useEffect(() => { if (!user || !allowed) return; const source = role === 'admin' ? collection(db, 'submissions') : query(collection(db, 'submissions'), where('organisationIds', 'array-contains', user.uid)); return onSnapshot(source, snapshot => setSubmissions(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as Submission).filter(item => item.gradingStatus !== 'pending')), reason => setMessage(reason.message)) }, [allowed, role, user])
   useEffect(() => { if (!user || !allowed) return; return onSnapshot(query(collection(db, 'assignmentBatches'), where('assignedBy', '==', user.uid)), snapshot => setAssignments(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as AssignmentBatch)), reason => setMessage(reason.message)) }, [allowed, user])
   useEffect(() => { if (!user || !allowed) return; (async () => { try { const source = role === 'admin' ? collection(db, 'organisationGroups') : query(collection(db, 'organisationGroups'), where('organisationId', '==', user.uid)); const snapshot = await getDocs(source); setGroups(await Promise.all(snapshot.docs.map(async item => ({ id: item.id, name: item.data().name as string, members: (await getDocs(collection(item.ref, 'members'))).docs.map(member => member.data() as Member) })))) } catch { setMessage('Unable to load groups.') } })() }, [allowed, role, user])
