@@ -25,6 +25,21 @@ export type CanonicalQuestion = {
   answerOrigin?: 'source_supported' | 'model_inferred'
 }
 
+export function questionSnapshot(question: CanonicalQuestion): CanonicalQuestion {
+  return {
+    id: question.id,
+    kind: question.kind,
+    prompt: question.prompt,
+    marks: question.marks,
+    ...(question.options !== undefined ? { options: question.options } : {}),
+    ...(question.correctOption !== undefined ? { correctOption: question.correctOption } : {}),
+    ...(question.explanation !== undefined ? { explanation: question.explanation } : {}),
+    ...(question.modelAnswer !== undefined ? { modelAnswer: question.modelAnswer } : {}),
+    ...(question.rubric !== undefined ? { rubric: question.rubric } : {}),
+    ...(question.answerOrigin !== undefined ? { answerOrigin: question.answerOrigin } : {}),
+  }
+}
+
 export function scoreResponses(
   questions: CanonicalQuestion[],
   responses: Array<z.infer<typeof SubmissionResponseSchema>>,

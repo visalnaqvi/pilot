@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { scoreResponses, type CanonicalQuestion } from '../lib/submission-scoring'
+import { questionSnapshot, scoreResponses, type CanonicalQuestion } from '../lib/submission-scoring'
 
 const questions: CanonicalQuestion[] = [
   { id: 'one', kind: 'mcq', prompt: 'One?', options: ['A', 'B', 'C', 'D'], correctOption: 1, marks: 2 },
@@ -26,4 +26,28 @@ test('MCQ-only submissions receive an immediate final score', () => {
   assert.equal(result.score, 0)
   assert.equal(result.gradingStatus, 'not_required')
   assert.equal(result.pendingMarks, 0)
+})
+
+test('question snapshots omit optional undefined Firestore values', () => {
+  const snapshot = questionSnapshot({
+    id: 'without-explanation',
+    kind: 'mcq',
+    prompt: 'One?',
+    options: ['A', 'B'],
+    correctOption: 0,
+    explanation: undefined,
+    modelAnswer: undefined,
+    rubric: undefined,
+    marks: 1,
+    answerOrigin: undefined,
+  })
+
+  assert.deepEqual(snapshot, {
+    id: 'without-explanation',
+    kind: 'mcq',
+    prompt: 'One?',
+    marks: 1,
+    options: ['A', 'B'],
+    correctOption: 0,
+  })
 })

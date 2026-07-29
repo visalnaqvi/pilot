@@ -1,6 +1,6 @@
 import { errorResponse, requireRole } from '@/lib/admin-api'
 import { adminDb, FieldValue } from '@/lib/firebase-admin'
-import { type CanonicalQuestion, scoreResponses, SubmitTestSchema } from '@/lib/submission-scoring'
+import { type CanonicalQuestion, questionSnapshot, scoreResponses, SubmitTestSchema } from '@/lib/submission-scoring'
 
 export const runtime = 'nodejs'
 
@@ -205,7 +205,7 @@ export async function POST(request: Request) {
         testId: input.testId,
         testOwnerId: gradingOwnerId,
         learnerId: auth.user.uid,
-        questions,
+        questions: questions.map(questionSnapshot),
         responses: input.responses,
         grades: {},
         createdAt: FieldValue.serverTimestamp(),
