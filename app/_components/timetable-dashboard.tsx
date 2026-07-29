@@ -141,13 +141,13 @@ export function TimetableDashboard() {
           const groupMembers = await getDocs(collection(document.ref, 'members'))
           return {
             id: document.id,
-            name: String(document.data().name || 'Group'),
+            name: String(document.data().name || 'Batch'),
             members: groupMembers.docs.map(member => member.data() as Member),
           }
         })).then(items => setGroups(items.sort((first, second) => first.name.localeCompare(second.name))))
-          .catch(() => setMessage('Could not load institute groups.'))
+          .catch(() => setMessage('Could not load institute batches.'))
       },
-      reason => setMessage(`Could not load institute groups: ${reason.message}`),
+      reason => setMessage(`Could not load institute batches: ${reason.message}`),
     )
   }, [canManage, user])
 
@@ -210,7 +210,7 @@ export function TimetableDashboard() {
   function clientValidation() {
     if (!input.name.trim() || !input.effectiveFrom || !input.effectiveTo) return 'Add a name and effective date range.'
     if (input.effectiveTo < input.effectiveFrom) return 'The end date must be on or after the start date.'
-    if (!assigneeIds.size) return 'Select at least one group or student.'
+    if (!assigneeIds.size) return 'Select at least one batch or student.'
     if (!input.entries.length || input.entries.some(entry => !entry.subject.trim())) return 'Every class needs a subject.'
     if (input.entries.some(entry => !daysForTimetableEntry(entry).length)) return 'Select at least one day for every class.'
     if (input.entries.some(entry => entry.endTime <= entry.startTime)) return 'Every class must end after it starts.'
@@ -305,7 +305,7 @@ export function TimetableDashboard() {
             <div><h2 className="font-black text-slate-950">{draft.name}</h2><p className="mt-1 text-xs text-slate-500">{draft.effectiveFrom} – {draft.effectiveTo}</p></div>
             <StatusBadge status={live?.status || 'draft'} />
           </div>
-          <p className="mt-4 text-sm text-slate-600">{draft.entries.length} weekly class{draft.entries.length === 1 ? '' : 'es'} · {draft.selectedGroupIds.length} group{draft.selectedGroupIds.length === 1 ? '' : 's'} · {draft.selectedUserIds.length} direct student{draft.selectedUserIds.length === 1 ? '' : 's'}</p>
+          <p className="mt-4 text-sm text-slate-600">{draft.entries.length} weekly class{draft.entries.length === 1 ? '' : 'es'} · {draft.selectedGroupIds.length} batch{draft.selectedGroupIds.length === 1 ? '' : 's'} · {draft.selectedUserIds.length} direct student{draft.selectedUserIds.length === 1 ? '' : 's'}</p>
           <div className="mt-5 flex flex-wrap gap-2">
             <button type="button" onClick={() => openDraft(draft)} className="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-black text-white shadow-sm hover:bg-indigo-700">Edit</button>
           </div>
@@ -385,8 +385,8 @@ export function LegacyTimetableEditor(props: {
             <label className="text-sm font-bold">Effective to <span className="text-rose-500">*</span><input required type="date" min={props.input.effectiveFrom || undefined} value={props.input.effectiveTo} onChange={event => props.setInput(current => ({ ...current, effectiveTo: event.target.value }))} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 font-normal" /></label>
           </div>
 
-          <fieldset><legend className="text-sm font-black">Groups</legend><p className="mt-1 text-xs text-slate-500">All current members of selected groups receive this timetable.</p><div className="mt-3 grid gap-2 sm:grid-cols-2">{props.groups.map(group => <AudienceChoice key={group.id} checked={props.input.selectedGroupIds.includes(group.id)} label={group.name} detail={`${group.members.length} members`} onChange={() => toggle('selectedGroupIds', group.id)} />)}{!props.groups.length && <EmptyChoice text="No groups available." />}</div></fieldset>
-          <fieldset><legend className="text-sm font-black">Individual students</legend><p className="mt-1 text-xs text-slate-500">Add students directly, with or without a group.</p><div className="mt-3 grid max-h-56 gap-2 overflow-auto pr-1 sm:grid-cols-2">{props.members.map(member => <AudienceChoice key={member.userId} checked={props.input.selectedUserIds.includes(member.userId)} label={memberName(member)} detail={member.userEmail} onChange={() => toggle('selectedUserIds', member.userId)} />)}{!props.members.length && <EmptyChoice text="No joined students available." />}</div></fieldset>
+          <fieldset><legend className="text-sm font-black">Batches</legend><p className="mt-1 text-xs text-slate-500">All current members of selected batches receive this timetable.</p><div className="mt-3 grid gap-2 sm:grid-cols-2">{props.groups.map(group => <AudienceChoice key={group.id} checked={props.input.selectedGroupIds.includes(group.id)} label={group.name} detail={`${group.members.length} members`} onChange={() => toggle('selectedGroupIds', group.id)} />)}{!props.groups.length && <EmptyChoice text="No batches available." />}</div></fieldset>
+          <fieldset><legend className="text-sm font-black">Individual students</legend><p className="mt-1 text-xs text-slate-500">Add students directly, with or without a batch.</p><div className="mt-3 grid max-h-56 gap-2 overflow-auto pr-1 sm:grid-cols-2">{props.members.map(member => <AudienceChoice key={member.userId} checked={props.input.selectedUserIds.includes(member.userId)} label={memberName(member)} detail={member.userEmail} onChange={() => toggle('selectedUserIds', member.userId)} />)}{!props.members.length && <EmptyChoice text="No joined students available." />}</div></fieldset>
 
           <fieldset>
             <div className="flex items-end justify-between gap-3"><div><legend className="text-sm font-black">Weekly classes</legend><p className="mt-1 text-xs text-slate-500">Times use the app timezone and repeat every week in the effective date range.</p></div><button type="button" onClick={() => props.setInput(current => ({ ...current, entries: [...current.entries, emptyEntry(crypto.randomUUID())] }))} className="rounded-lg bg-indigo-50 px-3 py-2 text-xs font-black text-indigo-700">+ Add class</button></div>

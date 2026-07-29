@@ -219,7 +219,7 @@ export function TaskBoard() {
         .map(item => item.data() as Member)
         .filter(member => member.status === 'accepted')
         .sort((a, b) => memberLabel(a).localeCompare(memberLabel(b)))),
-      reason => setMessage(`Could not load institute users: ${reason.message}`),
+      reason => setMessage(`Could not load institute students: ${reason.message}`),
     )
   }, [canCreate, user])
 
@@ -229,7 +229,7 @@ export function TaskBoard() {
       setUserDirectory(Object.fromEntries(snapshot.docs
         .map(item => [item.id, item.data() as DirectoryUser] as const)
         .filter(([, account]) => account.role === 'user')))
-    }, reason => setMessage(`Could not load user names: ${reason.message}`))
+    }, reason => setMessage(`Could not load student names: ${reason.message}`))
   }, [canCreate, user])
 
   useEffect(() => {
@@ -245,7 +245,7 @@ export function TaskBoard() {
             members: memberSnapshot.docs.map(member => member.data() as Member),
           }
         })).then(loaded => setGroups(loaded.sort((a, b) => a.name.localeCompare(b.name))))
-          .catch(() => setMessage('Could not load institute groups.'))
+          .catch(() => setMessage('Could not load institute batches.'))
       },
     )
   }, [canCreate, user])
@@ -344,7 +344,7 @@ export function TaskBoard() {
   async function createTask(event: FormEvent) {
     event.preventDefault()
     if (!user || !canCreate || !title.trim() || !description.trim() || !chosenAssignees.length) {
-      setMessage('Add a title, description, and at least one assigned user or group.')
+      setMessage('Add a title, description, and at least one assigned student or batch.')
       return
     }
     const startDate = startAt ? new Date(startAt) : null
@@ -427,13 +427,13 @@ export function TaskBoard() {
     }
     const currentStatus = assigneeStatuses[task.id]?.[assigneeId] || task.status || 'todo'
     if (status === 'closed' && (role !== 'organisation' || currentStatus !== 'done')) {
-      setMessage('Only the institute can close an individual task after that user reaches Done.')
+      setMessage('Only the institute can close an individual task after that student reaches Done.')
       return
     }
     if (currentStatus === 'closed' && role !== 'organisation') return
     if (currentStatus === status) return
     const assignee = task.assignedUsers?.find(item => item.userId === assigneeId)
-    const assigneeName = assignee?.userName || assignee?.userEmail || 'Assigned user'
+    const assigneeName = assignee?.userName || assignee?.userEmail || 'Assigned student'
     setMovingId(`${task.id}:${assigneeId}`)
     setMessage('')
     try {
@@ -445,7 +445,7 @@ export function TaskBoard() {
         status,
         updatedAt: serverTimestamp(),
         updatedBy: user.uid,
-        updatedByName: profile?.name || profile?.email || (role === 'organisation' ? 'Institute' : 'User'),
+        updatedByName: profile?.name || profile?.email || (role === 'organisation' ? 'Institute' : 'Student'),
       }, { merge: true })
       batch.update(doc(db, 'tasks', task.id), {
         updatedAt: serverTimestamp(),
@@ -454,7 +454,7 @@ export function TaskBoard() {
         lastStatusUserId: assigneeId,
         lastStatusUserName: assigneeName,
         lastStatusUpdatedBy: user.uid,
-        lastStatusUpdatedByName: profile?.name || profile?.email || (role === 'organisation' ? 'Institute' : 'User'),
+        lastStatusUpdatedByName: profile?.name || profile?.email || (role === 'organisation' ? 'Institute' : 'Student'),
       })
       await batch.commit()
     } catch (reason) {
@@ -479,7 +479,7 @@ export function TaskBoard() {
       return
     }
     const assignee = task.assignedUsers?.find(item => item.userId === user.uid)
-    const userName = profile?.name || assignee?.userName || profile?.email || 'User'
+    const userName = profile?.name || assignee?.userName || profile?.email || 'Student'
     const id = crypto.randomUUID()
     const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-120) || 'submission'
     const path = `task-submissions/${task.organisationId}/${task.id}/${user.uid}/${id}-${safeName}`
@@ -529,7 +529,7 @@ export function TaskBoard() {
   async function setTaskClosed(task: Task, closed: boolean) {
     if (!user || role !== 'organisation' || movingId) return
     if (closed && !allUsersComplete(task)) {
-      setMessage('Every assigned user must be Done or individually Closed before the complete task can be closed.')
+      setMessage('Every assigned student must be Done or individually Closed before the complete task can be closed.')
       return
     }
     setMovingId(`close:${task.id}`)
@@ -595,7 +595,7 @@ export function TaskBoard() {
     setMessage('')
     try {
       const body = comment.trim()
-      const authorName = profile?.name || profile?.email || (role === 'organisation' ? 'Institute' : 'User')
+      const authorName = profile?.name || profile?.email || (role === 'organisation' ? 'Institute' : 'Student')
       const batch = writeBatch(db)
       const commentRef = doc(collection(db, 'tasks', selectedTask.id, 'comments'))
       batch.set(commentRef, {
@@ -621,14 +621,14 @@ export function TaskBoard() {
     }
   }
 
-  if (!canUseTasks) return <section><h1 className="text-3xl font-black">Access denied</h1><p className="mt-3 text-slate-600">Tasks are available to institute and user accounts.</p></section>
+  if (!canUseTasks) return <section><h1 className="text-3xl font-black">Access denied</h1><p className="mt-3 text-slate-600">Tasks are available to institute and student accounts.</p></section>
 
   return <section className="mx-auto max-w-7xl">
     <header className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
       <div>
         <p className="text-sm font-bold tracking-widest text-indigo-600">{canCreate ? 'INSTITUTE WORKSPACE' : 'MY WORK'}</p>
         <h1 className="mt-1 text-4xl font-black tracking-tight">Tasks</h1>
-        <p className="mt-2 text-slate-600">{canCreate ? 'Plan work, follow progress, and collaborate with assigned users.' : 'Only tasks assigned to you appear on this board.'}</p>
+        <p className="mt-2 text-slate-600">{canCreate ? 'Plan work, follow progress, and collaborate with assigned students.' : 'Only tasks assigned to you appear on this board.'}</p>
       </div>
       {canCreate && <button type="button" onClick={() => { setFormOpen(true); setMessage('') }} className="rounded-xl bg-indigo-600 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700">+ Create task</button>}
     </header>
@@ -637,13 +637,13 @@ export function TaskBoard() {
       <label className="flex min-w-0 flex-1 items-center gap-3 rounded-xl border border-slate-300 bg-slate-50 px-4 py-2.5 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-100">
         <span aria-hidden="true" className="text-slate-400">⌕</span>
         <span className="sr-only">Search tasks</span>
-        <input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search tasks, users, or groups" className="min-w-0 flex-1 bg-transparent text-sm outline-none" />
+        <input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search tasks, students, or batches" className="min-w-0 flex-1 bg-transparent text-sm outline-none" />
       </label>
       <SearchPicker value={taskTypeFilter} options={[{ id: '', label: 'All task types' }, { id: 'basic', label: 'Basic' }, { id: 'submission', label: 'Submission' }, { id: 'assignment', label: 'Assignment' }]} onChange={option => setTaskTypeFilter(option.id)} placeholder="Filter by task type" />
       {role === 'user'
         ? <SearchPicker value={organisationFilter} options={[{ id: '', label: 'All institutes', detail: `${organisationOptions.length} institutes` }, ...organisationOptions]} onChange={option => setOrganisationFilter(option.id)} placeholder="Filter by institute" />
-        : <SearchPicker value={assigneeFilter} options={[{ id: '', label: 'All users', detail: `${assigneeOptions.length} users` }, ...assigneeOptions]} onChange={option => setAssigneeFilter(option.id)} placeholder="Search and filter by user" />}
-      {role === 'organisation' && <SearchPicker value={groupFilter} options={[{ id: '', label: 'All groups', detail: `${groupOptions.length} groups` }, ...groupOptions]} onChange={option => setGroupFilter(option.id)} placeholder="Search and filter by group" />}
+        : <SearchPicker value={assigneeFilter} options={[{ id: '', label: 'All students', detail: `${assigneeOptions.length} students` }, ...assigneeOptions]} onChange={option => setAssigneeFilter(option.id)} placeholder="Search and filter by student" />}
+      {role === 'organisation' && <SearchPicker value={groupFilter} options={[{ id: '', label: 'All batches', detail: `${groupOptions.length} batches` }, ...groupOptions]} onChange={option => setGroupFilter(option.id)} placeholder="Search and filter by batch" />}
       <div className="flex items-center justify-end gap-3">
         <p className="text-sm font-semibold text-slate-500">{displayedTasks.length} task{displayedTasks.length === 1 ? '' : 's'}</p>
         <button type="button" aria-pressed={showClosed} aria-label={showClosed ? 'Show active tasks' : 'Show closed tasks'} title={showClosed ? 'Show active tasks' : 'Show closed tasks'} onClick={() => setShowClosed(current => !current)} className={`grid h-10 w-10 place-items-center rounded-xl border text-lg font-black transition ${showClosed ? 'border-violet-300 bg-violet-100 text-violet-700 hover:bg-violet-200' : 'border-slate-300 bg-white text-slate-600 hover:border-violet-300 hover:bg-violet-50 hover:text-violet-700'}`}>
@@ -692,7 +692,7 @@ export function TaskBoard() {
       })}
     </div>
 
-    {!tasks.length && <div className="mt-6 rounded-2xl border-2 border-dashed border-slate-200 bg-white p-10 text-center"><p className="text-lg font-black text-slate-800">{canCreate ? 'Create your first task' : 'No tasks assigned yet'}</p><p className="mt-2 text-sm text-slate-500">{canCreate ? 'Assign it to a user or group and track it across the board.' : 'New tasks from your institutes will appear here.'}</p></div>}
+    {!tasks.length && <div className="mt-6 rounded-2xl border-2 border-dashed border-slate-200 bg-white p-10 text-center"><p className="text-lg font-black text-slate-800">{canCreate ? 'Create your first task' : 'No tasks assigned yet'}</p><p className="mt-2 text-sm text-slate-500">{canCreate ? 'Assign it to a student or batch and track it across the board.' : 'New tasks from your institutes will appear here.'}</p></div>}
 
     {formOpen && <CreateTaskDialog
       title={title}
@@ -836,6 +836,15 @@ function CreateTaskDialog(props: {
   close: () => void
 }) {
   const [fileError, setFileError] = useState('')
+  const [batchSearch, setBatchSearch] = useState('')
+  const [studentSearch, setStudentSearch] = useState('')
+  const normalizedBatchSearch = batchSearch.trim().toLowerCase()
+  const normalizedStudentSearch = studentSearch.trim().toLowerCase()
+  const visibleGroups = props.groups.filter(group => group.name.toLowerCase().includes(normalizedBatchSearch))
+  const visibleMembers = props.members.filter(member => (
+    memberLabel(member).toLowerCase().includes(normalizedStudentSearch)
+    || member.userEmail.toLowerCase().includes(normalizedStudentSearch)
+  ))
   const chooseFiles = (selected: File[]) => {
     const combined = [...props.files, ...selected]
     if (combined.length > 10) {
@@ -860,13 +869,13 @@ function CreateTaskDialog(props: {
         <fieldset>
           <legend className="text-sm font-bold text-slate-800">Task type <span className="text-rose-500">*</span></legend>
           <div className="mt-3 grid gap-3 sm:grid-cols-2">
-            <Choice checked={props.taskType === 'basic'} label="Basic" detail="Users move the task through every stage themselves." onChange={() => props.setTaskType('basic')} type="radio" />
-            <Choice checked={props.taskType === 'submission'} label="Submission" detail="A file upload is required before a user can complete the task." onChange={() => props.setTaskType('submission')} type="radio" />
+            <Choice checked={props.taskType === 'basic'} label="Basic" detail="Students move the task through every stage themselves." onChange={() => props.setTaskType('basic')} type="radio" />
+            <Choice checked={props.taskType === 'submission'} label="Submission" detail="A file upload is required before a student can complete the task." onChange={() => props.setTaskType('submission')} type="radio" />
           </div>
         </fieldset>
         <fieldset>
           <legend className="text-sm font-bold text-slate-800">Schedule</legend>
-          <p className="mt-1 text-xs text-slate-500">Users see the task at the start time. Their status and submissions freeze at the end time.</p>
+          <p className="mt-1 text-xs text-slate-500">Students see the task at the start time. Their status and submissions freeze at the end time.</p>
           <div className="mt-3 grid gap-4 sm:grid-cols-2">
             <label className="block text-sm font-bold text-slate-800">Start time <span className="font-normal text-slate-400">(optional)</span><input type="datetime-local" value={props.startAt} onChange={event => props.setStartAt(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 font-normal outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" /></label>
             <label className="block text-sm font-bold text-slate-800">End time <span className="font-normal text-slate-400">(optional)</span><input type="datetime-local" value={props.endAt} min={props.startAt || undefined} onChange={event => props.setEndAt(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 font-normal outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" /></label>
@@ -884,19 +893,23 @@ function CreateTaskDialog(props: {
           {!!props.files.length && <div className="mt-3 divide-y rounded-xl border border-slate-200 bg-white">{props.files.map((file, index) => <div key={`${file.name}:${file.size}:${index}`} className="flex items-center gap-3 px-4 py-3"><span aria-hidden="true">📎</span><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold text-slate-800">{file.name}</p><p className="mt-0.5 text-xs text-slate-500">{formatFileSize(file.size)}</p></div><button type="button" onClick={() => props.setFiles(props.files.filter((_, itemIndex) => itemIndex !== index))} className="text-xs font-bold text-rose-600 hover:underline">Remove</button></div>)}</div>}
         </fieldset>
         <fieldset>
-          <legend className="text-sm font-bold text-slate-800">Assign to groups</legend>
-          <p className="mt-1 text-xs text-slate-500">Every current member of a selected group receives the task.</p>
+          <legend className="text-sm font-bold text-slate-800">Assign to batches</legend>
+          <p className="mt-1 text-xs text-slate-500">Every current member of a selected batch receives the task.</p>
+          <input type="search" value={batchSearch} onChange={event => setBatchSearch(event.target.value)} placeholder="Search batches by name" aria-label="Search batches" className="mt-3 w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" />
           <div className="mt-3 grid gap-3 sm:grid-cols-2">
-            {props.groups.map(group => <Choice key={group.id} checked={props.selectedGroupIds.includes(group.id)} label={group.name} detail={`${group.members.length} member${group.members.length === 1 ? '' : 's'}`} onChange={() => props.toggleGroup(group.id)} />)}
-            {!props.groups.length && <p className="rounded-xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">No groups available. You can assign users directly below.</p>}
+            {visibleGroups.map(group => <Choice key={group.id} checked={props.selectedGroupIds.includes(group.id)} label={group.name} detail={`${group.members.length} member${group.members.length === 1 ? '' : 's'}`} onChange={() => props.toggleGroup(group.id)} />)}
+            {!props.groups.length && <p className="rounded-xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">No batches available. You can assign students directly below.</p>}
+            {!!props.groups.length && !visibleGroups.length && <p className="rounded-xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">No batches match your search.</p>}
           </div>
         </fieldset>
         <fieldset>
-          <legend className="text-sm font-bold text-slate-800">Assign to users</legend>
-          <p className="mt-1 text-xs text-slate-500">Choose individual joined users, with or without a group.</p>
+          <legend className="text-sm font-bold text-slate-800">Assign to students</legend>
+          <p className="mt-1 text-xs text-slate-500">Choose individual joined students, with or without a batch.</p>
+          <input type="search" value={studentSearch} onChange={event => setStudentSearch(event.target.value)} placeholder="Search students by name or email" aria-label="Search students" className="mt-3 w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" />
           <div className="mt-3 grid max-h-64 gap-3 overflow-auto pr-1 sm:grid-cols-2">
-            {props.members.map(member => <Choice key={member.userId} checked={props.selectedUserIds.includes(member.userId)} label={memberLabel(member)} detail={member.userEmail} onChange={() => props.toggleUser(member.userId)} />)}
-            {!props.members.length && <p className="rounded-xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">Invite users to your institute before assigning tasks.</p>}
+            {visibleMembers.map(member => <Choice key={member.userId} checked={props.selectedUserIds.includes(member.userId)} label={memberLabel(member)} detail={member.userEmail} onChange={() => props.toggleUser(member.userId)} />)}
+            {!props.members.length && <p className="rounded-xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">Invite students to your institute before assigning tasks.</p>}
+            {!!props.members.length && !visibleMembers.length && <p className="rounded-xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">No students match your search.</p>}
           </div>
         </fieldset>
       </div>
@@ -1030,21 +1043,21 @@ function TaskDetailDialog({ task, comments, role, currentUserId, now, assigneeSt
         </>}
         {role === 'organisation' && <>
           <button type="button" disabled={movingId === `close:${task.id}` || (!task.isClosed && !allAssigneesComplete)} onClick={() => toggleClosed(!task.isClosed)} className={`w-full rounded-xl px-4 py-3 text-sm font-black disabled:cursor-not-allowed disabled:opacity-40 ${task.isClosed ? 'border border-violet-300 bg-white text-violet-700 hover:bg-violet-50' : 'bg-violet-600 text-white hover:bg-violet-700'}`}>{movingId === `close:${task.id}` ? 'Updating…' : task.isClosed ? 'Reopen complete task' : 'Close complete task'}</button>
-          {!task.isClosed && !allAssigneesComplete && <p className="mt-2 text-xs font-semibold leading-5 text-slate-500">Available after every user is Done or individually Closed.</p>}
+          {!task.isClosed && !allAssigneesComplete && <p className="mt-2 text-xs font-semibold leading-5 text-slate-500">Available after every student is Done or individually Closed.</p>}
         </>}
         <div className="mt-7">
-          <p className="text-xs font-black tracking-wider text-slate-400">{role === 'organisation' ? 'USER PROGRESS' : 'ASSIGNEES'}</p>
+          <p className="text-xs font-black tracking-wider text-slate-400">{role === 'organisation' ? 'STUDENT PROGRESS' : 'ASSIGNEES'}</p>
           {role === 'organisation' && <div className="mt-3 grid gap-2">
             <label className="flex min-w-0 items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2.5 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-100">
               <span aria-hidden="true" className="text-slate-400">⌕</span>
-              <span className="sr-only">Search users</span>
+              <span className="sr-only">Search students</span>
               <input value={assigneeSearch} onChange={event => setAssigneeSearch(event.target.value)} placeholder="Search name or email" className="min-w-0 flex-1 bg-transparent text-sm outline-none" />
             </label>
-            <select aria-label="Filter users by status" value={assigneeStatusFilter} onChange={event => setAssigneeStatusFilter(event.target.value as TaskStatus | '')} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm font-bold text-slate-700 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100">
+            <select aria-label="Filter students by status" value={assigneeStatusFilter} onChange={event => setAssigneeStatusFilter(event.target.value as TaskStatus | '')} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm font-bold text-slate-700 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100">
               <option value="">All statuses</option>
               {stages.map(stage => <option key={stage.id} value={stage.id}>{stage.label}</option>)}
             </select>
-            <p className="text-xs font-semibold text-slate-400">{visibleAssignees.length} of {sortedAssignees.length} users</p>
+            <p className="text-xs font-semibold text-slate-400">{visibleAssignees.length} of {sortedAssignees.length} students</p>
           </div>}
           <div className="mt-3 space-y-3">{visibleAssignees.map(assignee => {
             const displayName = assigneeDisplayName(assignee, memberDirectory)
@@ -1056,7 +1069,7 @@ function TaskDetailDialog({ task, comments, role, currentUserId, now, assigneeSt
               {role === 'organisation' && task.taskType === 'submission' && (submissions[assignee.userId] ? <button type="button" title={submissions[assignee.userId].attachment.name} onClick={() => void openAttachment(submissions[assignee.userId].attachment)} className="col-span-2 col-start-2 w-fit max-w-full whitespace-nowrap rounded-full bg-emerald-50 px-2 py-1 leading-none text-emerald-700 hover:bg-emerald-100"><span className="text-xs font-semibold">View submission</span></button> : <p className="col-span-2 col-start-2 text-xs font-semibold text-amber-600">Awaiting file</p>)}
             </div>
           })}
-          {!visibleAssignees.length && <div className="rounded-xl border border-dashed border-slate-200 px-4 py-6 text-center text-sm font-semibold text-slate-400">No users match these filters.</div>}
+          {!visibleAssignees.length && <div className="rounded-xl border border-dashed border-slate-200 px-4 py-6 text-center text-sm font-semibold text-slate-400">No students match these filters.</div>}
           </div>
         </div>
         {!!task.audienceNames?.length && <div className="mt-7"><p className="text-xs font-black tracking-wider text-slate-400">AUDIENCE</p><div className="mt-3 flex flex-wrap gap-2">{task.audienceNames.map(name => <span key={name} className="rounded-full bg-indigo-100 px-2.5 py-1 text-xs font-bold text-indigo-700">{name}</span>)}</div></div>}
@@ -1080,7 +1093,7 @@ function DeleteTaskDialog({ task, confirmation, setConfirmation, deleting, confi
     <form onSubmit={event => { event.preventDefault(); if (matches && !deleting) confirm() }} onMouseDown={event => event.stopPropagation()} className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
       <span className="grid h-12 w-12 place-items-center rounded-full bg-rose-100 text-xl text-rose-700">!</span>
       <h2 id="delete-task-title" className="mt-5 text-2xl font-black text-slate-950">Delete task?</h2>
-      <p className="mt-2 text-sm leading-6 text-slate-600">This permanently deletes the task, its comments, progress, {task.attachments?.length || 0} task attachment{task.attachments?.length === 1 ? '' : 's'}, and all user submission files. Type <strong className="text-slate-900">{task.title}</strong> to confirm.</p>
+      <p className="mt-2 text-sm leading-6 text-slate-600">This permanently deletes the task, its comments, progress, {task.attachments?.length || 0} task attachment{task.attachments?.length === 1 ? '' : 's'}, and all student submission files. Type <strong className="text-slate-900">{task.title}</strong> to confirm.</p>
       <label className="mt-5 block text-sm font-bold text-slate-800">Task title<input value={confirmation} onChange={event => setConfirmation(event.target.value)} autoComplete="off" placeholder={task.title} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 font-normal outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-100" /></label>
       {confirmation && !matches && <p className="mt-2 text-sm font-semibold text-rose-600">The task title does not match.</p>}
       <div className="mt-6 flex justify-end gap-3 border-t border-slate-200 pt-5"><button type="button" disabled={deleting} onClick={close} className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-bold text-slate-700 disabled:opacity-50">Cancel</button><button disabled={!matches || deleting} className="rounded-xl bg-rose-600 px-5 py-3 text-sm font-bold text-white disabled:opacity-40">{deleting ? 'Deleting…' : 'Delete task'}</button></div>

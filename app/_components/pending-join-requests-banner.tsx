@@ -58,7 +58,7 @@ export function PendingJoinRequestsBanner() {
     </span>
     <p className="min-w-0 flex-1">
       <span className="font-black">Approval needed:</span>{' '}
-      You have {requests.length} pending user join request{requests.length === 1 ? '' : 's'}.
+      You have {requests.length} pending student join request{requests.length === 1 ? '' : 's'}.
       {' '}<Link href="/organisation/users#join-requests" className="font-black text-indigo-700 underline decoration-indigo-300 underline-offset-2 hover:text-indigo-900">Review now</Link>
     </p>
     <button type="button" onClick={dismiss} aria-label="Dismiss pending join requests reminder" className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-xl leading-none text-indigo-500 hover:bg-indigo-100 hover:text-indigo-800">×</button>

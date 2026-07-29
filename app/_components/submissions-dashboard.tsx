@@ -98,12 +98,12 @@ export function SubmissionsDashboard({ initialSubmissionId, initialUserId }: { i
   if (!user) return null
   return <section>
     <h1 className="text-4xl font-black">{title}</h1>
-    <p className="mt-3 text-slate-600">{role === 'admin' ? 'Review every saved test attempt.' : role === 'organisation' ? 'Review attempts from users who were members of your institute when they submitted.' : 'Review your completed mock-test attempts.'}</p>
+    <p className="mt-3 text-slate-600">{role === 'admin' ? 'Review every saved test attempt.' : role === 'organisation' ? 'Review attempts from students who were members of your institute when they submitted.' : 'Review your completed mock-test attempts.'}</p>
     <div className="mt-7 grid gap-4 rounded-2xl border border-slate-200 bg-white p-5 sm:grid-cols-2 lg:grid-cols-3">
       <Filter label="Test"><SearchPicker value={testId} options={[{ id: '', label: 'All tests' }, ...tests.map(([id, label]) => ({ id, label }))]} onChange={(option) => { setTestId(option.id); setPage(1) }} placeholder="Search tests" /></Filter>
       <Filter label="Exam"><SearchPicker value={exam} options={[{ id: '', label: 'All exams' }, ...exams.map((label) => ({ id: label, label }))]} onChange={(option) => { setExam(option.id); setCategory(''); setTestId(''); setPage(1) }} placeholder="Search exams" /></Filter>
       <Filter label="Test category"><SearchPicker value={category} options={[{ id: '', label: 'All categories' }, ...categories.map((label) => ({ id: label, label }))]} onChange={(option) => { setCategory(option.id); setTestId(''); setPage(1) }} placeholder="Search categories" /></Filter>
-      {role !== 'user' && <Filter label="User"><SearchPicker value={userId} options={[{ id: '', label: 'All users' }, ...users]} onChange={(option) => { setUserId(option.id); setPage(1) }} placeholder="Search by name or email" /></Filter>}
+      {role !== 'user' && <Filter label="Student"><SearchPicker value={userId} options={[{ id: '', label: 'All students' }, ...users]} onChange={(option) => { setUserId(option.id); setPage(1) }} placeholder="Search by name or email" /></Filter>}
       {role !== 'organisation' && <Filter label="Institute"><SearchPicker value={organisationId} options={[{ id: '', label: 'All institutes' }, ...organisations.map(([id, label]) => ({ id, label }))]} onChange={(option) => { setOrganisationId(option.id); setPage(1) }} placeholder="Search institutes" /></Filter>}
       <Filter label="From date"><input value={from} onChange={(event) => { setFrom(event.target.value); setPage(1) }} type="date" /></Filter>
       <Filter label="To date"><input value={to} onChange={(event) => { setTo(event.target.value); setPage(1) }} type="date" /></Filter>

@@ -26,7 +26,7 @@ export function AdminImpersonationPicker() {
   const options = useMemo(() => accounts.map(account => ({
     id: account.uid,
     label: account.name?.trim() || account.email,
-    detail: `${account.email} · ${account.role === 'organisation' ? 'Institute' : 'User'}`,
+    detail: `${account.email} · ${account.role === 'organisation' ? 'Institute' : 'Student'}`,
   })), [accounts])
 
   if (actualProfile?.role !== 'admin' || isImpersonating) return null
@@ -41,10 +41,10 @@ export function AdminImpersonationPicker() {
             <h1 className="mt-1 text-2xl font-black text-slate-950">Impersonate an account</h1>
           </div>
         </div>
-        <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-600">Search by name or email to preview the entire app exactly as a user or institute sees it. Impersonation is view-only.</p>
+        <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-600">Search by name or email to preview the entire app exactly as a student or institute sees it. Impersonation is view-only.</p>
       </div>
       <label className="block text-sm font-bold text-slate-800">
-        User or institute
+        Student or institute
         <span className="mt-2 block font-normal">
           <SearchPicker value="" options={options} onChange={option => {
             const target = accounts.find(account => account.uid === option.id)

@@ -101,7 +101,7 @@ function ExamDashboardSummary({ stats, testCount }: {
 }) {
   const items = [
     ['Tests', testCount || stats.tests],
-    ['Group users', stats.groupUsers],
+    ['Batch students', stats.groupUsers],
     ['Completion', stats.groupUsers ? `${Math.round(stats.completion)}%` : '—'],
   ]
   return <dl className="grid gap-3 sm:grid-cols-3">{items.map(([label, value]) => <div key={label} className="rounded-xl border border-indigo-100 bg-indigo-50 p-4"><dt className="text-xs font-bold uppercase tracking-wide text-indigo-600">{label}</dt><dd className="mt-1 text-2xl font-black text-indigo-950">{value}</dd></div>)}</dl>

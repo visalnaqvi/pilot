@@ -188,13 +188,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <div className="flex min-w-max gap-1 px-1">
                 {role === 'organisation' ? (
                   <>
-                    <Link href="/organisation/groups" className={workspaceTab('/organisation/groups')}>Groups</Link>
-                    <Link href="/organisation/users" className={workspaceTab('/organisation/users')}>Users</Link>
+                    <Link href="/organisation/groups" className={workspaceTab('/organisation/groups')}>Batches</Link>
+                    <Link href="/organisation/users" className={workspaceTab('/organisation/users')}>Students</Link>
                   </>
                 ) : (
                   <>
                     <Link href="/admin/exam-updates" className={workspaceTab('/admin/exam-updates')}>Exam updates</Link>
-                    <Link href="/admin/users" className={workspaceTab('/admin/users')}>Users</Link>
+                    <Link href="/admin/users" className={workspaceTab('/admin/users')}>Students</Link>
                   </>
                 )}
               </div>

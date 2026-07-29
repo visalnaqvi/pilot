@@ -106,7 +106,7 @@ export function AssignmentCalendarDashboard() {
       try {
         const snapshot = role === 'admin' ? await getDocs(query(collection(db, 'users'), where('role', '==', 'user'))) : await getDocs(query(collection(db, 'organisationInvites'), where('organisationId', '==', user.uid)))
         setAccounts(role === 'admin' ? snapshot.docs.map(item => ({ uid: item.id, ...item.data() }) as UserProfile) : snapshot.docs.map(item => item.data() as { userId: string; userEmail: string; status: string }).filter(item => item.status === 'accepted').map(item => ({ uid: item.userId, email: item.userEmail, role: 'user' })))
-      } catch { setMessage('Unable to load assignment users.') }
+      } catch { setMessage('Unable to load assignment students.') }
     })()
   }, [manager, role, user])
   useEffect(() => {

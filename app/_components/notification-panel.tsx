@@ -335,7 +335,7 @@ export function NotificationPanel() {
       invites.filter(invite => invite.status === 'pending' && invite.initiatedBy === 'user').forEach(invite => {
         items.push({
           id: `join-request:${invite.id}:${time(invite.createdAt)}`,
-          title: 'New user join request',
+          title: 'New student join request',
           detail: `${invite.userName || invite.userEmail} requested to join your institute`,
           at: time(invite.createdAt),
           href: '/organisation/users#join-requests',
@@ -399,7 +399,7 @@ export function NotificationPanel() {
             id: `task-status:${task.id}:${statusAt}`,
             title: `Task moved to ${statusLabel}`,
             detail: role === 'organisation'
-              ? `${task.title} · ${task.lastStatusUserName || 'Assigned user'} updated by ${task.lastStatusUpdatedByName || 'a user'}`
+              ? `${task.title} · ${task.lastStatusUserName || 'Assigned student'} updated by ${task.lastStatusUpdatedByName || 'a student'}`
               : `${task.title} · Updated by ${task.lastStatusUpdatedByName || 'your institute'}`,
             at: statusAt,
             href: '/tasks',
