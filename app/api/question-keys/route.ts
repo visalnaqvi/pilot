@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { errorResponse, requireRole } from '@/lib/admin-api'
 import { adminDb, FieldValue } from '@/lib/firebase-admin'
+import { isTeacherForOrganisation } from '@/lib/teacher-access'
 
 export const runtime = 'nodejs'
 
@@ -17,15 +18,20 @@ const WriteSchema = z.object({
 
 async function authorizedQuestions(questionIds: string[], user: { uid: string; role: string }) {
   const snapshots = await adminDb.getAll(...questionIds.map(id => adminDb.collection('questions').doc(id)))
-  const allowed = snapshots.every(snapshot => {
+  const checks = await Promise.all(snapshots.map(async snapshot => {
     const data = snapshot.data()
-    return snapshot.exists && data && (user.role === 'admin' || data.createdBy === user.uid || data.organisationId === user.uid)
-  })
+    if (!snapshot.exists || !data) return false
+    if (user.role === 'admin' || data.organisationId === user.uid) return true
+    return data.createdBy === user.uid
+      && typeof data.organisationId === 'string'
+      && await isTeacherForOrganisation(user.uid, data.organisationId)
+  }))
+  const allowed = checks.every(Boolean)
   return { snapshots, allowed }
 }
 
 export async function POST(request: Request) {
-  const auth = await requireRole(request, ['organisation', 'admin'])
+  const auth = await requireRole(request, ['user', 'organisation', 'admin'])
   if ('error' in auth) return auth.error
   try {
     const parsed = ReadSchema.safeParse(await request.json())
@@ -42,7 +48,7 @@ export async function POST(request: Request) {
 }
 
 export async function PUT(request: Request) {
-  const auth = await requireRole(request, ['organisation', 'admin'])
+  const auth = await requireRole(request, ['user', 'organisation', 'admin'])
   if ('error' in auth) return auth.error
   try {
     const parsed = WriteSchema.safeParse(await request.json())

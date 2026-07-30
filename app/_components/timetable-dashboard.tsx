@@ -12,18 +12,22 @@ import {
 } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
 import {
+  addDays,
   daysForTimetableEntry,
+  localDateKey,
   timetableEntryOverlaps,
   timetableWeekdayOrder,
   timetableWeekdays,
+  weekdayForDate,
   type TimetableEntry,
   type TimetableInput,
 } from '@/lib/timetable'
 import { useAuth } from './auth-context'
 import { TimetableEditor as InteractiveTimetableEditor } from './timetable-editor'
+import { memberRole, type MemberRole } from '@/lib/membership'
 
 type DateValue = { toDate: () => Date }
-type Member = { userId: string; userName?: string; userEmail: string; status?: string }
+type Member = { userId: string; userName?: string; userEmail: string; status?: string; memberRole?: MemberRole }
 type DirectoryUser = { name?: string; email?: string; role?: string }
 type Group = { id: string; name: string; members: Member[] }
 type DraftTimetable = TimetableInput & {
@@ -42,6 +46,7 @@ export type PublishedTimetable = TimetableInput & {
   status: 'active' | 'archived'
   revision: number
   assignedUserIds: string[]
+  teacherUserIds?: string[]
   audienceNames?: string[]
   publishedAt?: DateValue
   archivedAt?: DateValue | null
@@ -54,6 +59,7 @@ const emptyEntry = (id = 'class-1'): TimetableEntry => ({
   startTime: '09:00',
   endTime: '10:00',
   teacher: '',
+  teacherUserId: undefined,
   location: '',
   meetingUrl: '',
   notes: '',
@@ -84,7 +90,8 @@ export function TimetableDashboard() {
   const [saving, setSaving] = useState(false)
   const [publishing, setPublishing] = useState(false)
   const [message, setMessage] = useState('')
-  const [openedEntry, setOpenedEntry] = useState<{ entry: TimetableEntry; timetable: PublishedTimetable | DraftTimetable } | null>(null)
+  const [viewerMembershipRole, setViewerMembershipRole] = useState<'loading' | 'student' | 'teacher'>('loading')
+  const [openedEntry, setOpenedEntry] = useState<{ entry: TimetableEntry; timetable: PublishedTimetable; classDate: string } | null>(null)
 
   useEffect(() => {
     if (!user || !canManage) return
@@ -98,7 +105,31 @@ export function TimetableDashboard() {
   }, [canManage, user])
 
   useEffect(() => {
+    if (!user || role !== 'user') return
+    return onSnapshot(
+      query(collection(db, 'organisationInvites'), where('userId', '==', user.uid), where('status', '==', 'accepted')),
+      snapshot => setViewerMembershipRole(snapshot.docs.some(document => memberRole(document.data().memberRole) === 'teacher') ? 'teacher' : 'student'),
+      () => setViewerMembershipRole('student'),
+    )
+  }, [role, user])
+
+  useEffect(() => {
     if (!user || !canView) return
+    if (!canManage && viewerMembershipRole === 'loading') return
+    if (!canManage && viewerMembershipRole === 'teacher') {
+      let active = true
+      void user.getIdToken()
+        .then(token => fetch('/api/timetables', { headers: { authorization: `Bearer ${token}` } }))
+        .then(async response => {
+          const payload = await response.json().catch(() => ({})) as { timetables?: PublishedTimetable[]; error?: string }
+          if (!response.ok) throw new Error(payload.error || 'Unable to load published timetables.')
+          if (active) setPublished((payload.timetables || []).sort((first, second) => first.name.localeCompare(second.name)))
+        })
+        .catch(reason => {
+          if (active) setMessage(`Could not load published timetables: ${reason instanceof Error ? reason.message : 'Unknown error'}`)
+        })
+      return () => { active = false }
+    }
     const source = canManage
       ? query(collection(db, 'timetables'), where('organisationId', '==', user.uid))
       : query(collection(db, 'timetables'), where('assignedUserIds', 'array-contains', user.uid))
@@ -109,7 +140,7 @@ export function TimetableDashboard() {
         .sort((first, second) => first.name.localeCompare(second.name))),
       reason => setMessage(`Could not load published timetables: ${reason.message}`),
     )
-  }, [canManage, canView, user])
+  }, [canManage, canView, user, viewerMembershipRole])
 
   useEffect(() => {
     if (!user || !canManage) return
@@ -151,13 +182,25 @@ export function TimetableDashboard() {
     )
   }, [canManage, user])
 
-  const activeTimetables = published.filter(timetable => timetable.status === 'active')
+  const viewerIsTeacher = role === 'user' && viewerMembershipRole === 'teacher'
+  const activeTimetables = useMemo(() => published
+    .filter(timetable => timetable.status === 'active')
+    .map(timetable => ({
+      ...timetable,
+      entries: timetable.entries.filter(entry => (
+        (!viewerIsTeacher || entry.teacherUserId === user?.uid)
+        && entryOccursInCurrentWeek(entry, timetable)
+      )),
+    }))
+    .filter(timetable => timetable.entries.length > 0), [published, user?.uid, viewerIsTeacher])
   const conflictCount = useMemo(() => crossTimetableConflicts(activeTimetables), [activeTimetables])
-  const resolvedMembers = useMemo(() => members.map(member => ({
+  const resolvedPeople = useMemo(() => members.map(member => ({
     ...member,
     userName: directory[member.userId]?.name || member.userName,
     userEmail: directory[member.userId]?.email || member.userEmail,
   })).sort((first, second) => memberName(first).localeCompare(memberName(second))), [directory, members])
+  const resolvedMembers = useMemo(() => resolvedPeople.filter(member => memberRole(member.memberRole) === 'student'), [resolvedPeople])
+  const resolvedTeachers = useMemo(() => resolvedPeople.filter(member => memberRole(member.memberRole) === 'teacher'), [resolvedPeople])
   const assigneeIds = useMemo(() => new Set([
     ...input.selectedUserIds,
     ...groups
@@ -319,7 +362,7 @@ export function TimetableDashboard() {
         <div><p className="text-xs font-black tracking-widest text-indigo-600">PUBLISHED VIEW</p><h2 className="mt-1 text-xl font-black">Weekly timetable</h2></div>
         <p className="text-xs font-semibold text-slate-500">{activeTimetables.length} active timetable{activeTimetables.length === 1 ? '' : 's'}</p>
       </div>
-      <WeeklySchedule timetables={activeTimetables} open={(entry, timetable) => setOpenedEntry({ entry, timetable })} />
+      <WeeklySchedule timetables={activeTimetables} open={(entry, timetable, classDate) => setOpenedEntry({ entry, timetable, classDate })} />
     </section>
 
     {formOpen && <InteractiveTimetableEditor
@@ -327,6 +370,7 @@ export function TimetableDashboard() {
       input={input}
       groups={groups}
       members={resolvedMembers}
+      teachers={resolvedTeachers}
       assigneeCount={assigneeIds.size}
       saving={saving}
       publishing={publishing}
@@ -343,7 +387,7 @@ export function TimetableDashboard() {
       }}
       close={() => setFormOpen(false)}
     />}
-    {openedEntry && <EntryDetails {...openedEntry} close={() => setOpenedEntry(null)} />}
+    {openedEntry && <EntryDetails {...openedEntry} canManageAttendance={openedEntry.timetable.status === 'active' && (canManage || (viewerIsTeacher && openedEntry.entry.teacherUserId === user?.uid))} close={() => setOpenedEntry(null)} />}
   </section>
 }
 
@@ -442,11 +486,33 @@ export function LegacyTimetableEditor(props: {
   </div>
 }
 
-function WeeklySchedule({ timetables, open }: { timetables: PublishedTimetable[]; open: (entry: TimetableEntry, timetable: PublishedTimetable) => void }) {
+function WeeklySchedule({ timetables, open }: { timetables: PublishedTimetable[]; open: (entry: TimetableEntry, timetable: PublishedTimetable, classDate: string) => void }) {
+  const displayDates = currentWeekDateKeys(timetables[0]?.timeZone)
   return <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">{timetableWeekdays.map((day, weekday) => {
-    const slots = timetables.flatMap(timetable => timetable.entries.filter(entry => daysForTimetableEntry(entry).includes(weekday)).map(entry => ({ entry, timetable }))).sort((first, second) => first.entry.startTime.localeCompare(second.entry.startTime))
-    return <section key={day} className="min-h-36 rounded-xl border border-slate-200 bg-slate-50 p-3"><h3 className="text-xs font-black uppercase tracking-wider text-slate-500">{day}</h3><div className="mt-3 space-y-2">{slots.map(({ entry, timetable }) => <button type="button" key={`${timetable.id}:${entry.id}`} onClick={() => open(entry, timetable)} className="block w-full rounded-lg border border-indigo-200 bg-white p-2.5 text-left shadow-sm hover:border-indigo-400"><span className="block text-[10px] font-black text-indigo-600">{entry.startTime}–{entry.endTime}</span><span className="mt-1 block text-xs font-black text-slate-900">{entry.subject}</span><span className="mt-0.5 block truncate text-[10px] text-slate-500">{entry.teacher || timetable.name}</span></button>)}{!slots.length && <p className="text-xs text-slate-400">No classes</p>}</div></section>
+    const slots = timetables.flatMap(timetable => {
+      const classDate = currentWeekDateKeys(timetable.timeZone)[weekday]
+      if (classDate < timetable.effectiveFrom || classDate > timetable.effectiveTo) return []
+      return timetable.entries
+        .filter(entry => daysForTimetableEntry(entry).includes(weekday))
+        .map(entry => ({ entry, timetable, classDate }))
+    }).sort((first, second) => first.entry.startTime.localeCompare(second.entry.startTime))
+    return <section key={day} className="min-h-36 rounded-xl border border-slate-200 bg-slate-50 p-3"><h3 className="text-xs font-black uppercase tracking-wider text-slate-500">{day}</h3><p className="mt-0.5 text-[10px] font-bold text-slate-400">{new Date(`${displayDates[weekday]}T00:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</p><div className="mt-3 space-y-2">{slots.map(({ entry, timetable, classDate }) => <button type="button" key={`${timetable.id}:${entry.id}`} onClick={() => open(entry, timetable, classDate)} className="block w-full rounded-lg border border-indigo-200 bg-white p-2.5 text-left shadow-sm hover:border-indigo-400"><span className="block text-[10px] font-black text-indigo-600">{entry.startTime}–{entry.endTime}</span><span className="mt-1 block text-xs font-black text-slate-900">{entry.subject}</span><span className="mt-0.5 block truncate text-[10px] text-slate-500">{entry.teacher || timetable.name}</span></button>)}{!slots.length && <p className="text-xs text-slate-400">No classes</p>}</div></section>
   })}</div>
+}
+
+function currentWeekDateKeys(timeZone = 'Asia/Kolkata') {
+  const today = localDateKey(new Date(), timeZone)
+  const sunday = addDays(today, -weekdayForDate(today))
+  return Array.from({ length: 7 }, (_, weekday) => addDays(sunday, weekday))
+}
+
+function entryOccursInCurrentWeek(entry: TimetableEntry, timetable: PublishedTimetable) {
+  const weekdays = daysForTimetableEntry(entry)
+  return currentWeekDateKeys(timetable.timeZone).some(date => (
+    date >= timetable.effectiveFrom
+    && date <= timetable.effectiveTo
+    && weekdays.includes(weekdayForDate(date))
+  ))
 }
 
 function WeeklyCalendarPreview({ entries }: { entries: TimetableEntry[] }) {
@@ -505,9 +571,69 @@ function previewTimeBounds(entries: TimetableEntry[]) {
   return { minimum: format(minimumHour), maximum: format(Math.max(minimumHour + 2, maximumHour)) }
 }
 
-function EntryDetails({ entry, timetable, close }: { entry: TimetableEntry; timetable: PublishedTimetable | DraftTimetable; close: () => void }) {
+function EntryDetails({ entry, timetable, classDate, canManageAttendance, close }: {
+  entry: TimetableEntry
+  timetable: PublishedTimetable
+  classDate: string
+  canManageAttendance: boolean
+  close: () => void
+}) {
+  const { user } = useAuth()
   const days = daysForTimetableEntry(entry).map(day => timetableWeekdays[day]).join(', ')
-  return <div role="dialog" aria-modal="true" className="fixed inset-0 z-[70] grid place-items-center bg-slate-950/55 p-4" onMouseDown={close}><section className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl" onMouseDown={event => event.stopPropagation()}><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-black tracking-widest text-indigo-600">CLASS DETAILS</p><h2 className="mt-2 text-2xl font-black">{entry.subject}</h2><p className="mt-1 text-sm font-semibold text-indigo-700">{timetable.organisationName} · {timetable.name}</p></div><button type="button" onClick={close} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold">Close</button></div><dl className="mt-6 space-y-3 rounded-xl bg-slate-50 p-4 text-sm"><Detail label="Schedule" value={`${days}, ${entry.startTime}–${entry.endTime}`} /><Detail label="Effective dates" value={`${timetable.effectiveFrom} – ${timetable.effectiveTo}`} />{entry.teacher && <Detail label="Teacher" value={entry.teacher} />}{entry.location && <Detail label="Room or location" value={entry.location} />}{entry.notes && <Detail label="Notes" value={entry.notes} />}</dl>{entry.meetingUrl && <a href={entry.meetingUrl} target="_blank" rel="noreferrer" className="mt-5 block rounded-xl bg-indigo-600 px-4 py-3 text-center text-sm font-black text-white">Open meeting link</a>}</section></div>
+  const isFuture = classDate > localDateKey(new Date(), timetable.timeZone || 'Asia/Kolkata')
+  const [cancelling, setCancelling] = useState(false)
+  const [cancelled, setCancelled] = useState(false)
+  const [message, setMessage] = useState('')
+
+  async function cancelClass() {
+    if (!user || !canManageAttendance || cancelling || cancelled) return
+    const cancellationReason = window.prompt('Optional cancellation reason. Leave blank if none.')
+    if (cancellationReason === null) return
+    setCancelling(true)
+    setMessage('')
+    try {
+      const token = await user.getIdToken()
+      const openResponse = await fetch('/api/attendance/sessions', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          timetableId: timetable.id,
+          entryId: entry.id,
+          classDate,
+          intent: 'cancel',
+        }),
+      })
+      const opened = await openResponse.json().catch(() => ({})) as { session?: { id: string; revision: number; status: string }; error?: string }
+      if (!openResponse.ok || !opened.session) throw new Error(opened.error || 'Unable to open this class occurrence.')
+      if (opened.session.status === 'cancelled') {
+        setCancelled(true)
+        setMessage('This class is already cancelled.')
+        return
+      }
+      const response = await fetch(`/api/attendance/sessions/${encodeURIComponent(opened.session.id)}`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          revision: opened.session.revision,
+          status: 'cancelled',
+          records: [],
+          cancellationReason,
+        }),
+      })
+      const result = await response.json().catch(() => ({})) as { session?: { status: string }; error?: string }
+      if (!response.ok || result.session?.status !== 'cancelled') {
+        throw new Error(result.error || 'Unable to cancel this class.')
+      }
+      setCancelled(true)
+      setMessage('Class cancelled.')
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : 'Unable to cancel this class.')
+    } finally {
+      setCancelling(false)
+    }
+  }
+
+  return <div role="dialog" aria-modal="true" className="fixed inset-0 z-[70] grid place-items-center bg-slate-950/55 p-4" onMouseDown={close}><section className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl" onMouseDown={event => event.stopPropagation()}><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-black tracking-widest text-indigo-600">CLASS DETAILS</p><h2 className="mt-2 text-2xl font-black">{entry.subject}</h2><p className="mt-1 text-sm font-semibold text-indigo-700">{timetable.organisationName} · {timetable.name}</p></div><button type="button" onClick={close} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold">Close</button></div><dl className="mt-6 space-y-3 rounded-xl bg-slate-50 p-4 text-sm"><Detail label="Class date" value={classDate} /><Detail label="Schedule" value={`${days}, ${entry.startTime}–${entry.endTime}`} /><Detail label="Effective dates" value={`${timetable.effectiveFrom} – ${timetable.effectiveTo}`} />{entry.teacher && <Detail label="Teacher" value={entry.teacher} />}{entry.location && <Detail label="Room or location" value={entry.location} />}{entry.notes && <Detail label="Notes" value={entry.notes} />}</dl>{message && <p role="status" className={`mt-4 rounded-xl px-4 py-3 text-sm font-bold ${cancelled ? 'bg-slate-100 text-slate-700' : 'bg-rose-50 text-rose-700'}`}>{message}</p>}<div className="mt-5 grid gap-2 sm:grid-cols-2">{canManageAttendance && (isFuture || cancelled ? <button type="button" disabled title={cancelled ? 'This class is cancelled' : 'Attendance is available on the class date'} className="cursor-not-allowed rounded-xl bg-emerald-200 px-4 py-3 text-center text-sm font-black text-emerald-800 opacity-70">{cancelled ? 'Class cancelled' : 'Take attendance'}</button> : <a href={`/attendance?timetableId=${encodeURIComponent(timetable.id)}&entryId=${encodeURIComponent(entry.id)}&classDate=${encodeURIComponent(classDate)}`} className="rounded-xl bg-emerald-600 px-4 py-3 text-center text-sm font-black text-white hover:bg-emerald-700">Take attendance</a>)}{canManageAttendance && <button type="button" disabled={cancelling || cancelled} onClick={() => void cancelClass()} className="rounded-xl border border-rose-300 px-4 py-3 text-sm font-black text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50">{cancelling ? 'Cancelling…' : cancelled ? 'Class cancelled' : 'Cancel class'}</button>}{entry.meetingUrl && <a href={entry.meetingUrl} target="_blank" rel="noreferrer" className="rounded-xl bg-indigo-600 px-4 py-3 text-center text-sm font-black text-white">Open meeting link</a>}</div></section></div>
 }
 
 function Detail({ label, value }: { label: string; value: string }) {

@@ -1,6 +1,7 @@
 import 'server-only'
 
 import { adminDb } from './firebase-admin'
+import { memberRole } from './membership'
 
 export type ResolvedAssignee = {
   userId: string
@@ -47,9 +48,41 @@ async function assertAcceptedMembers(organisationId: string, userIds: string[]) 
   const invitations = await adminDb.getAll(...ids.map(userId => (
     adminDb.collection('organisationInvites').doc(`${organisationId}_${userId}`)
   )))
-  if (invitations.some(invitation => !invitation.exists || invitation.data()?.status !== 'accepted')) {
-    throw new Error('Every selected assignee must be an accepted member of your institute.')
+  if (invitations.some(invitation => !invitation.exists
+    || invitation.data()?.status !== 'accepted'
+    || memberRole(invitation.data()?.memberRole) !== 'student')) {
+    throw new Error('Every selected assignee must be an accepted student of your institute.')
   }
+}
+
+export async function resolveCurrentStudentAudience(input: {
+  organisationId: string
+  selectedUserIds: string[]
+  selectedGroupIds: string[]
+}) {
+  const selectedGroups = await Promise.all(unique(input.selectedGroupIds).map(async groupId => {
+    const group = await adminDb.collection('organisationGroups').doc(groupId).get()
+    if (!group.exists || group.data()?.organisationId !== input.organisationId) {
+      throw new Error('One or more selected groups do not belong to your institute.')
+    }
+    const members = await group.ref.collection('members').get()
+    return members.docs
+      .map(document => String(document.data().userId || ''))
+      .filter(Boolean)
+  }))
+  const candidateIds = unique([...input.selectedUserIds, ...selectedGroups.flat()])
+  if (!candidateIds.length) return []
+  const invitations = await adminDb.getAll(...candidateIds.map(userId => (
+    adminDb.collection('organisationInvites').doc(`${input.organisationId}_${userId}`)
+  )))
+  const studentIds = invitations.flatMap((invitation, index) => (
+    invitation.exists
+      && invitation.data()?.status === 'accepted'
+      && memberRole(invitation.data()?.memberRole) === 'student'
+      ? [candidateIds[index]]
+      : []
+  ))
+  return resolveUserRecipients(studentIds)
 }
 
 export async function resolveOrganisationTaskAudience(input: {
@@ -105,6 +138,7 @@ export async function resolveOrganisationTaskAudience(input: {
 export async function resolveAssignmentAudience(input: {
   actorId: string
   actorRole: 'organisation' | 'admin'
+  organisationId?: string
   targetType: 'group' | 'user'
   targetId: string
 }) {
@@ -113,7 +147,7 @@ export async function resolveAssignmentAudience(input: {
   if (input.targetType === 'group') {
     const group = await adminDb.collection('organisationGroups').doc(input.targetId).get()
     if (!group.exists) throw new Error('The selected group does not exist.')
-    if (input.actorRole === 'organisation' && group.data()?.organisationId !== input.actorId) {
+    if (input.organisationId && group.data()?.organisationId !== input.organisationId) {
       throw new Error('The selected group does not belong to your institute.')
     }
     const members = await group.ref.collection('members').get()
@@ -126,7 +160,7 @@ export async function resolveAssignmentAudience(input: {
   }
   userIds = unique(userIds)
   if (!userIds.length) throw new Error('The selected audience has no users.')
-  if (input.actorRole === 'organisation') await assertAcceptedMembers(input.actorId, userIds)
+  if (input.organisationId) await assertAcceptedMembers(input.organisationId, userIds)
   const profiles = await userProfiles(userIds)
   const assignees = userIds.map(userId => {
     const profile = profiles.get(userId)

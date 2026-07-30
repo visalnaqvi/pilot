@@ -6,9 +6,18 @@ service cloud.firestore {
     function isAdmin() { return signedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'; }
     function isOrganisation() { return signedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'organisation'; }
     function canCreateTests() { return isAdmin() || isOrganisation(); }
+    function canManageTaskData(task) {
+      return isOrganisation() && task.organisationId == request.auth.uid
+        || (signedIn() && task.createdBy == request.auth.uid
+          && isAcceptedTeacher(task.organisationId, request.auth.uid));
+    }
+    function canViewTaskData(task) {
+      return signedIn() && isAcceptedTeacher(task.organisationId, request.auth.uid);
+    }
     function canAccessTask(taskId) {
       let task = get(/databases/$(database)/documents/tasks/$(taskId)).data;
-      return signedIn() && (isAdmin() || (canCreateTests() && task.organisationId == request.auth.uid)
+      return signedIn() && (isAdmin() || canManageTaskData(task)
+        || canViewTaskData(task)
         || request.auth.uid in task.assignedUserIds);
     }
     function taskUserWindowOpen(taskId) {
@@ -27,6 +36,17 @@ service cloud.firestore {
       let inviteId = organisationId + '_' + userId;
       return /databases/$(database)/documents/organisationInvites/$(inviteId);
     }
+    function isAcceptedStudent(organisationId, userId) {
+      return exists(organisationInvitePath(organisationId, userId))
+        && get(organisationInvitePath(organisationId, userId)).data.status == 'accepted'
+        && (!('memberRole' in get(organisationInvitePath(organisationId, userId)).data)
+          || get(organisationInvitePath(organisationId, userId)).data.memberRole == 'student');
+    }
+    function isAcceptedTeacher(organisationId, userId) {
+      return exists(organisationInvitePath(organisationId, userId))
+        && get(organisationInvitePath(organisationId, userId)).data.status == 'accepted'
+        && get(organisationInvitePath(organisationId, userId)).data.memberRole == 'teacher';
+    }
     function testAssignmentPath(assignmentBatchId, userId) {
       let assignmentId = assignmentBatchId + '_' + userId;
       return /databases/$(database)/documents/testAssignments/$(assignmentId);
@@ -38,32 +58,48 @@ service cloud.firestore {
     }
     function canReadTestById(testId) {
       let test = get(/databases/$(database)/documents/tests/$(testId)).data;
-      return signedIn() && ((test.deletedAt != null && (isAdmin() || (isOrganisation() && test.createdBy == request.auth.uid)))
+      return signedIn() && ((test.deletedAt != null && (isAdmin() || canManageTest(testId)))
         || (test.deletedAt == null && (isAdmin() || test.visibility == 'public'
           || (test.visibility == 'private' && belongsToOrganisation(test.organisationId))
-          || (test.visibility == 'assigned' && isOrganisation() && test.createdBy == request.auth.uid))));
+          || (test.visibility == 'assigned' && canManageTest(testId)))));
     }
     function canListTest() {
       let test = resource.data;
-      return signedIn() && ((test.deletedAt != null && (isAdmin() || (isOrganisation() && test.createdBy == request.auth.uid)))
+      return signedIn() && ((test.deletedAt != null && (isAdmin()
+          || (test.createdBy == request.auth.uid
+            && (isOrganisation() || isAcceptedTeacher(test.organisationId, request.auth.uid)))))
         || (test.deletedAt == null && (isAdmin() || test.visibility == 'public'
           || (test.visibility == 'private' && belongsToOrganisation(test.organisationId))
-          || (test.visibility == 'assigned' && isOrganisation() && test.createdBy == request.auth.uid))));
+          || (test.visibility == 'assigned'
+            && ((test.createdBy == request.auth.uid && isOrganisation())
+              || isAcceptedTeacher(test.organisationId, request.auth.uid))))));
     }
     function canManageTest(testId) {
-      return isAdmin() || (isOrganisation() && get(/databases/$(database)/documents/tests/$(testId)).data.createdBy == request.auth.uid);
+      let test = get(/databases/$(database)/documents/tests/$(testId)).data;
+      return isAdmin() || (test.createdBy == request.auth.uid
+        && (isOrganisation() || isAcceptedTeacher(test.organisationId, request.auth.uid)));
     }
     function canCreateMembership(testId) {
-      return canManageTest(testId) || (canCreateTests() && getAfter(/databases/$(database)/documents/tests/$(testId)).data.createdBy == request.auth.uid);
+      let test = getAfter(/databases/$(database)/documents/tests/$(testId)).data;
+      return isAdmin() || (test.createdBy == request.auth.uid
+        && (isOrganisation() || isAcceptedTeacher(test.organisationId, request.auth.uid)));
     }
     function canReadQuestion() {
       return signedIn() && (isAdmin() || resource.data.visibility == 'public' || (resource.data.visibility == 'private' && belongsToOrganisation(resource.data.organisationId)));
     }
-    function canManageQuestion() { return isAdmin() || (isOrganisation() && resource.data.createdBy == request.auth.uid); }
+    function canManageQuestion() {
+      return isAdmin() || (resource.data.createdBy == request.auth.uid
+        && (isOrganisation() || isAcceptedTeacher(resource.data.organisationId, request.auth.uid)));
+    }
+    function canCreateInstituteContent(data) {
+      return isAdmin() || (data.createdBy == request.auth.uid
+        && (isOrganisation() || isAcceptedTeacher(data.organisationId, request.auth.uid)));
+    }
     function validTestAccessMode(data) {
-      return data.visibility == 'public'
-        || (isOrganisation() && data.organisationId == request.auth.uid
-          && data.visibility in ['private', 'assigned']);
+      return (data.visibility == 'public' && canCreateTests())
+        || (data.visibility in ['private', 'assigned']
+          && ((isOrganisation() && data.organisationId == request.auth.uid)
+            || isAcceptedTeacher(data.organisationId, request.auth.uid)));
     }
     function canAssignTest(testId) {
       return canManageTest(testId)
@@ -80,8 +116,12 @@ service cloud.firestore {
     }
     function canOpenTest(testId) {
       let test = get(/databases/$(database)/documents/tests/$(testId)).data;
-      return isAdmin() || (isOrganisation() && test.createdBy == request.auth.uid)
+      return isAdmin() || canManageTest(testId)
         || test.visibility != 'assigned';
+    }
+    function teacherCanViewAssignment(assignmentBatchId) {
+      let assignment = get(/databases/$(database)/documents/assignmentBatches/$(assignmentBatchId)).data;
+      return signedIn() && isAcceptedTeacher(assignment.organisationId, request.auth.uid);
     }
     function validPrivateSubmission(testId, data) {
       let test = get(/databases/$(database)/documents/tests/$(testId)).data;
@@ -132,7 +172,8 @@ service cloud.firestore {
     }
 
     match /organisationInvites/{inviteId} {
-      allow get, list: if signedIn() && (resource.data.organisationId == request.auth.uid || resource.data.userId == request.auth.uid || isAdmin());
+      allow get, list: if signedIn() && (resource.data.organisationId == request.auth.uid || resource.data.userId == request.auth.uid || isAdmin()
+        || isAcceptedTeacher(resource.data.organisationId, request.auth.uid));
       allow create: if (isOrganisation()
           && request.resource.data.organisationId == request.auth.uid
           && request.resource.data.organisationEmail == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.email
@@ -181,25 +222,28 @@ service cloud.firestore {
     }
 
     match /organisationGroups/{groupId} {
-      allow get, list: if isAdmin() || (isOrganisation() && resource.data.organisationId == request.auth.uid);
+      allow get, list: if isAdmin() || (isOrganisation() && resource.data.organisationId == request.auth.uid)
+        || isAcceptedTeacher(resource.data.organisationId, request.auth.uid);
       allow create: if isOrganisation() && request.resource.data.organisationId == request.auth.uid && request.resource.data.createdBy == request.auth.uid && request.resource.data.name is string && request.resource.data.name.size() > 0;
       allow update: if isOrganisation() && resource.data.organisationId == request.auth.uid && request.resource.data.organisationId == resource.data.organisationId && request.resource.data.createdBy == resource.data.createdBy;
       allow delete: if isOrganisation() && resource.data.organisationId == request.auth.uid;
 
       match /members/{memberId} {
-        allow get, list: if isAdmin() || (isOrganisation() && get(/databases/$(database)/documents/organisationGroups/$(groupId)).data.organisationId == request.auth.uid);
-        allow create: if isOrganisation() && get(/databases/$(database)/documents/organisationGroups/$(groupId)).data.organisationId == request.auth.uid && request.resource.data.userId == memberId && exists(organisationInvitePath(request.auth.uid, memberId)) && get(organisationInvitePath(request.auth.uid, memberId)).data.status == 'accepted';
+        allow get, list: if isAdmin() || (isOrganisation() && get(/databases/$(database)/documents/organisationGroups/$(groupId)).data.organisationId == request.auth.uid)
+          || isAcceptedTeacher(get(/databases/$(database)/documents/organisationGroups/$(groupId)).data.organisationId, request.auth.uid);
+        allow create: if isOrganisation() && get(/databases/$(database)/documents/organisationGroups/$(groupId)).data.organisationId == request.auth.uid && request.resource.data.userId == memberId && isAcceptedStudent(request.auth.uid, memberId);
         allow update: if false;
         allow delete: if isOrganisation() && get(/databases/$(database)/documents/organisationGroups/$(groupId)).data.organisationId == request.auth.uid;
       }
     }
 
     match /tasks/{taskId} {
-      allow get, list: if signedIn() && (isAdmin() || (canCreateTests() && resource.data.organisationId == request.auth.uid)
+      allow get, list: if signedIn() && (isAdmin() || canManageTaskData(resource.data)
+        || canViewTaskData(resource.data)
         || request.auth.uid in resource.data.assignedUserIds);
       allow create: if false;
       allow update: if signedIn()
-        && ((isOrganisation() && resource.data.organisationId == request.auth.uid)
+        && ((canManageTaskData(resource.data))
           || request.auth.uid in resource.data.assignedUserIds)
         && request.resource.data.organisationId == resource.data.organisationId
         && request.resource.data.createdBy == resource.data.createdBy
@@ -209,12 +253,12 @@ service cloud.firestore {
         && request.resource.data.assignedUsers == resource.data.assignedUsers
         && request.resource.data.assignedGroupIds == resource.data.assignedGroupIds
         && request.resource.data.audienceNames == resource.data.audienceNames
-        && (((isOrganisation() || request.resource.data.lastStatusUserId == request.auth.uid)
-            && (isOrganisation() || taskUserWindowOpen(taskId))
+        && (((canManageTaskData(resource.data) || request.resource.data.lastStatusUserId == request.auth.uid)
+            && (canManageTaskData(resource.data) || taskUserWindowOpen(taskId))
             && request.resource.data.lastStatusUserId in resource.data.assignedUserIds
             && request.resource.data.lastStatusUpdatedBy == request.auth.uid
             && request.resource.data.lastStatus in ['todo', 'in_progress', 'done', 'closed']
-            && (request.resource.data.lastStatus != 'closed' || isOrganisation())
+            && (request.resource.data.lastStatus != 'closed' || canManageTaskData(resource.data))
             && (request.resource.data.lastStatus != 'done'
               || !('taskType' in resource.data)
               || resource.data.taskType == 'basic'
@@ -227,7 +271,7 @@ service cloud.firestore {
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
               'updatedAt', 'lastCommentAt', 'lastCommentAuthorId', 'lastCommentAuthorName', 'lastCommentPreview'
             ]))
-          || (isOrganisation()
+          || (canManageTaskData(resource.data)
             && request.resource.data.isClosed is bool
             && request.resource.data.closedBy == request.auth.uid
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
@@ -245,16 +289,18 @@ service cloud.firestore {
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
               'isClosed', 'updatedAt', 'closedAt', 'closedBy', 'closedByName'
             ])));
-      allow delete: if isOrganisation() && resource.data.organisationId == request.auth.uid;
+      allow delete: if canManageTaskData(resource.data);
 
       match /assignees/{assigneeId} {
         allow get: if canAccessTask(taskId)
-          && (isAdmin() || isOrganisation() || assigneeId == request.auth.uid);
-        allow list: if isAdmin() || (isOrganisation()
-          && get(/databases/$(database)/documents/tasks/$(taskId)).data.organisationId == request.auth.uid);
+          && (isAdmin() || canManageTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data)
+            || canViewTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data)
+            || assigneeId == request.auth.uid);
+        allow list: if isAdmin() || canManageTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data)
+          || canViewTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data);
         allow create: if canAccessTask(taskId)
-          && (isOrganisation() || assigneeId == request.auth.uid)
-          && (isOrganisation() || taskUserWindowOpen(taskId))
+          && (canManageTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data) || assigneeId == request.auth.uid)
+          && (canManageTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data) || taskUserWindowOpen(taskId))
           && (!('isClosed' in get(/databases/$(database)/documents/tasks/$(taskId)).data)
             || get(/databases/$(database)/documents/tasks/$(taskId)).data.isClosed == false)
           && request.resource.data.userId == assigneeId
@@ -265,16 +311,16 @@ service cloud.firestore {
             || get(/databases/$(database)/documents/tasks/$(taskId)).data.taskType == 'basic'
             || existsAfter(/databases/$(database)/documents/tasks/$(taskId)/submissions/$(assigneeId)));
         allow update: if canAccessTask(taskId)
-          && (isOrganisation() || assigneeId == request.auth.uid)
-          && (isOrganisation() || taskUserWindowOpen(taskId))
+          && (canManageTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data) || assigneeId == request.auth.uid)
+          && (canManageTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data) || taskUserWindowOpen(taskId))
           && (!('isClosed' in get(/databases/$(database)/documents/tasks/$(taskId)).data)
             || get(/databases/$(database)/documents/tasks/$(taskId)).data.isClosed == false)
           && request.resource.data.userId == resource.data.userId
           && request.resource.data.userId == assigneeId
           && request.resource.data.status in ['todo', 'in_progress', 'done', 'closed']
-          && (resource.data.status != 'closed' || isOrganisation())
+          && (resource.data.status != 'closed' || canManageTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data))
           && (request.resource.data.status != 'closed'
-            || (isOrganisation() && resource.data.status == 'done'))
+            || (canManageTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data) && resource.data.status == 'done'))
           && (request.resource.data.status != 'done'
             || !('taskType' in get(/databases/$(database)/documents/tasks/$(taskId)).data)
             || get(/databases/$(database)/documents/tasks/$(taskId)).data.taskType == 'basic'
@@ -282,15 +328,16 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'status', 'updatedAt', 'updatedBy', 'updatedByName', 'userName', 'userEmail'
           ]);
-        allow delete: if isOrganisation()
-          && get(/databases/$(database)/documents/tasks/$(taskId)).data.organisationId == request.auth.uid;
+        allow delete: if canManageTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data);
       }
 
       match /submissions/{submitterId} {
         allow get: if canAccessTask(taskId)
-          && (isAdmin() || isOrganisation() || submitterId == request.auth.uid);
-        allow list: if isAdmin() || (isOrganisation()
-          && get(/databases/$(database)/documents/tasks/$(taskId)).data.organisationId == request.auth.uid);
+          && (isAdmin() || canManageTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data)
+            || canViewTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data)
+            || submitterId == request.auth.uid);
+        allow list: if isAdmin() || canManageTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data)
+          || canViewTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data);
         allow create: if signedIn()
           && submitterId == request.auth.uid
           && request.resource.data.userId == request.auth.uid
@@ -303,13 +350,14 @@ service cloud.firestore {
           && request.resource.data.attachment.size is int
           && request.resource.data.attachment.size <= 20 * 1024 * 1024;
         allow update: if false;
-        allow delete: if isOrganisation()
-          && get(/databases/$(database)/documents/tasks/$(taskId)).data.organisationId == request.auth.uid;
+        allow delete: if canManageTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data);
       }
 
       match /comments/{commentId} {
         allow get, list: if canAccessTask(taskId);
         allow create: if canAccessTask(taskId)
+          && (canManageTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data)
+            || request.auth.uid in get(/databases/$(database)/documents/tasks/$(taskId)).data.assignedUserIds)
           && request.resource.data.authorId == request.auth.uid
           && request.resource.data.authorRole == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role
           && request.resource.data.authorRole in ['user', 'organisation']
@@ -317,8 +365,7 @@ service cloud.firestore {
           && request.resource.data.body.size() > 0
           && request.resource.data.body.size() <= 5000;
         allow update: if false;
-        allow delete: if isOrganisation()
-          && get(/databases/$(database)/documents/tasks/$(taskId)).data.organisationId == request.auth.uid;
+        allow delete: if canManageTaskData(get(/databases/$(database)/documents/tasks/$(taskId)).data);
       }
     }
 
@@ -375,15 +422,22 @@ service cloud.firestore {
       // missing-field branch preserves categories created before organisationId
       // was introduced.
       allow get, list: if isAdmin() || (signedIn() && resource.data.createdBy == request.auth.uid
-        && (!('organisationId' in resource.data) || resource.data.organisationId == request.auth.uid));
-      allow create: if canCreateTests() && request.resource.data.createdBy == request.auth.uid && request.resource.data.examId is string && request.resource.data.examId.size() > 0 && request.resource.data.name is string && request.resource.data.name.size() > 0
-        && ((isOrganisation() && request.resource.data.organisationId == request.auth.uid) || (isAdmin() && !('organisationId' in request.resource.data)));
+        && (!('organisationId' in resource.data) || resource.data.organisationId == request.auth.uid
+          || isAcceptedTeacher(resource.data.organisationId, request.auth.uid)));
+      allow create: if canCreateInstituteContent(request.resource.data) && request.resource.data.examId is string && request.resource.data.examId.size() > 0 && request.resource.data.name is string && request.resource.data.name.size() > 0
+        && ((isOrganisation() && request.resource.data.organisationId == request.auth.uid)
+          || isAcceptedTeacher(request.resource.data.organisationId, request.auth.uid)
+          || (isAdmin() && !('organisationId' in request.resource.data)));
       allow update, delete: if false;
     }
 
     match /questions/{questionId} {
       allow get, list: if canReadQuestion();
-      allow create: if canCreateTests() && hasNoAnswerKey(request.resource.data) && request.resource.data.createdBy == request.auth.uid && request.resource.data.visibility in ['public', 'private'] && (request.resource.data.visibility == 'public' || (isOrganisation() && request.resource.data.organisationId == request.auth.uid));
+      allow create: if canCreateInstituteContent(request.resource.data) && hasNoAnswerKey(request.resource.data) && request.resource.data.visibility in ['public', 'private']
+        && ((request.resource.data.visibility == 'public' && canCreateTests())
+          || (request.resource.data.visibility == 'private'
+            && ((isOrganisation() && request.resource.data.organisationId == request.auth.uid)
+              || isAcceptedTeacher(request.resource.data.organisationId, request.auth.uid))));
       allow update: if canManageQuestion() && hasNoAnswerKey(request.resource.data) && request.resource.data.createdBy == resource.data.createdBy && request.resource.data.visibility == resource.data.visibility && request.resource.data.organisationId == resource.data.organisationId;
       allow delete: if false;
     }
@@ -409,7 +463,7 @@ service cloud.firestore {
       // constrained query can only return allowed documents.
       allow list: if canListTest();
       allow get: if canReadTestById(testId) && canOpenTest(testId);
-      allow create: if canCreateTests() && !('questions' in request.resource.data) && hasExam(request.resource.data) && hasCategory(request.resource.data) && request.resource.data.published is bool && request.resource.data.createdBy == request.auth.uid && request.resource.data.deletedAt == null && request.resource.data.visibility in ['public', 'private', 'assigned'] && validTestAccessMode(request.resource.data);
+      allow create: if canCreateInstituteContent(request.resource.data) && !('questions' in request.resource.data) && hasExam(request.resource.data) && hasCategory(request.resource.data) && request.resource.data.published is bool && request.resource.data.deletedAt == null && request.resource.data.visibility in ['public', 'private', 'assigned'] && validTestAccessMode(request.resource.data);
       allow update: if canManageTest(testId) && !('questions' in request.resource.data) && (!('exam' in resource.data) || hasExam(request.resource.data)) && (!('category' in resource.data) || hasCategory(request.resource.data)) && (!('published' in resource.data) || request.resource.data.published is bool) && ((resource.data.deletedAt != null && request.resource.data.deletedAt == null && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deletedAt', 'deletedBy'])) || (resource.data.deletedAt == null && request.resource.data.createdBy == resource.data.createdBy && (request.resource.data.deletedAt == null || request.resource.data.deletedBy == request.auth.uid) && request.resource.data.visibility in ['public', 'private', 'assigned'] && validTestAccessMode(request.resource.data)));
       allow delete: if false;
 
@@ -430,7 +484,9 @@ service cloud.firestore {
     }
 
     match /assignmentBatches/{batchId} {
-      allow get, list: if signedIn() && (resource.data.assignedBy == request.auth.uid || isAdmin());
+      allow get, list: if signedIn() && (resource.data.assignedBy == request.auth.uid || isAdmin()
+        || (isOrganisation() && resource.data.organisationId == request.auth.uid)
+        || isAcceptedTeacher(resource.data.organisationId, request.auth.uid));
       allow create: if false;
       allow update, delete: if false;
     }
@@ -444,8 +500,20 @@ service cloud.firestore {
     match /timetables/{timetableId} {
       allow get, list: if signedIn() && (isAdmin()
         || (isOrganisation() && resource.data.organisationId == request.auth.uid)
-        || request.auth.uid in resource.data.assignedUserIds);
+        || (request.auth.uid in resource.data.assignedUserIds
+          && isAcceptedStudent(resource.data.organisationId, request.auth.uid))
+        || (('teacherUserIds' in resource.data)
+          && request.auth.uid in resource.data.teacherUserIds
+          && isAcceptedTeacher(resource.data.organisationId, request.auth.uid))
+        || isAcceptedTeacher(resource.data.organisationId, request.auth.uid));
       allow create, update, delete: if false;
+    }
+
+    match /attendanceSessions/{sessionId} {
+      allow read, write: if false;
+      match /history/{historyId} {
+        allow read, write: if false;
+      }
     }
 
     match /taskEmailJobs/{jobId} {
@@ -471,7 +539,10 @@ service cloud.firestore {
     }
 
     match /submissions/{submissionId} {
-      allow get, list: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin() || (isOrganisation() && request.auth.uid in resource.data.organisationIds));
+      allow get, list: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin()
+        || (isOrganisation() && request.auth.uid in resource.data.organisationIds)
+        || (('assignmentBatchId' in resource.data)
+          && teacherCanViewAssignment(resource.data.assignmentBatchId)));
       allow create, update, delete: if false;
     }
 

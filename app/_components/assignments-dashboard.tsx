@@ -1,25 +1,42 @@
 'use client'
 
-import { Children, FormEvent, isValidElement, useEffect, useMemo, useRef, useState } from 'react'
-import { collection, doc, getDoc, getDocs, onSnapshot, query, where } from 'firebase/firestore'
-import { db } from '@/lib/firebase'
+import { Children, FormEvent, isValidElement, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useAuth, type UserProfile } from './auth-context'
 import { SearchPicker } from './search-picker'
 import { paginate, Pagination } from './pagination'
 import type { MockTest, Submission } from './test-types'
 import { SubmissionAnswersModal } from './submission-answers-modal'
 import { attemptsForAssignment } from '@/lib/assignment-attempts'
+import { useTeacherOrganisations } from './use-teacher-organisations'
 
 type Member = { userId: string; userEmail: string }
 type Group = { id: string; name: string; members: Member[] }
-export type AssignmentBatch = { id: string; name: string; testId: string; testTitle: string; exam?: string; assignedBy: string; audienceName: string; assignedUserIds: string[]; assignedCount: number; maxAttempts?: number; startAt?: { toDate: () => Date }; deadline: { toDate: () => Date }; createdAt?: { toDate: () => Date } }
+export type AssignmentBatch = { id: string; name: string; testId: string; testTitle: string; exam?: string; assignedBy: string; organisationId?: string; audienceName: string; assignedUserIds: string[]; assignedCount: number; maxAttempts?: number; startAt?: { toDate: () => Date }; deadline: { toDate: () => Date }; createdAt?: { toDate: () => Date } }
 const score = (item: Submission) => item.totalMarks ? item.score / item.totalMarks * 100 : 0
 const assignmentUserDetails = new Map<string, { name: string; email: string; groups: string[] }>()
+const timestampValue = (value: unknown) => typeof value === 'string'
+  ? { toDate: () => new Date(value) }
+  : undefined
+
+type AssignmentManagementPayload = {
+  tests?: Array<Record<string, unknown>>
+  groups?: Group[]
+  users?: UserProfile[]
+  submissions?: Array<Record<string, unknown>>
+  assignments?: Array<Record<string, unknown>>
+  error?: string
+}
 
 export function AssignmentsDashboard() {
   const { user, profile } = useAuth()
   const role = profile?.role
-  const allowed = role === 'admin' || role === 'organisation'
+  const { organisations: teacherOrganisations, loading: teacherOrganisationsLoading } = useTeacherOrganisations(role === 'user' ? user : null)
+  const isTeacher = role === 'user' && teacherOrganisations.length > 0
+  const allowed = role === 'admin' || role === 'organisation' || isTeacher
+  const [selectedOrganisationId, setSelectedOrganisationId] = useState('')
+  const organisationId = role === 'organisation'
+    ? user?.uid || ''
+    : selectedOrganisationId || (teacherOrganisations.length === 1 ? teacherOrganisations[0].id : '')
   const [tests, setTests] = useState<MockTest[]>([])
   const [groups, setGroups] = useState<Group[]>([])
   const [users, setUsers] = useState<UserProfile[]>([])
@@ -38,7 +55,52 @@ export function AssignmentsDashboard() {
   const [page, setPage] = useState(1)
   const assignmentActionRef = useRef<HTMLButtonElement | null>(null)
 
-  useEffect(() => { if (!user || !allowed) return; const source = role === 'admin' ? query(collection(db, 'tests'), where('visibility', '==', 'assigned')) : query(collection(db, 'tests'), where('createdBy', '==', user.uid), where('visibility', '==', 'assigned'), where('deletedAt', '==', null)); return onSnapshot(source, snapshot => setTests(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as MockTest).filter(test => test.deletedAt == null && test.published !== false)), reason => setMessage(reason.message)) }, [allowed, role, user])
+  const loadManagementData = useCallback(async (signal?: AbortSignal) => {
+    if (!user || !allowed || (isTeacher && !organisationId)) return
+    const search = new URLSearchParams()
+    if (organisationId) search.set('organisationId', organisationId)
+    const response = await fetch(`/api/assignments${search.size ? `?${search}` : ''}`, {
+      headers: { authorization: `Bearer ${await user.getIdToken()}` },
+      cache: 'no-store',
+      signal,
+    })
+    const payload = await response.json().catch(() => ({})) as AssignmentManagementPayload
+    if (!response.ok) throw new Error(payload.error || 'Unable to load assignments.')
+
+    setTests((payload.tests || []).map(item => ({
+      ...item,
+      createdAt: timestampValue(item.createdAt) || null,
+    })) as MockTest[])
+    setGroups(payload.groups || [])
+    setUsers(payload.users || [])
+    setSubmissions((payload.submissions || []).map(item => ({
+      ...item,
+      submittedAt: timestampValue(item.submittedAt),
+    })) as Submission[])
+    setAssignments((payload.assignments || []).flatMap(item => {
+      const deadlineValue = timestampValue(item.deadline)
+      if (!deadlineValue) return []
+      return [{
+        ...item,
+        startAt: timestampValue(item.startAt),
+        deadline: deadlineValue,
+        createdAt: timestampValue(item.createdAt),
+      } as AssignmentBatch]
+    }))
+    setMessage('')
+  }, [allowed, isTeacher, organisationId, user])
+
+  useEffect(() => {
+    if (!user || !allowed || (isTeacher && !organisationId)) return
+    const controller = new AbortController()
+    queueMicrotask(() => {
+      void loadManagementData(controller.signal).catch(reason => {
+        if (reason instanceof DOMException && reason.name === 'AbortError') return
+        setMessage(reason instanceof Error ? reason.message : 'Unable to load assignments.')
+      })
+    })
+    return () => controller.abort()
+  }, [allowed, isTeacher, loadManagementData, organisationId, user])
   useEffect(() => { const openDatePicker = (event: MouseEvent) => { const input = event.target instanceof HTMLInputElement && event.target.type === 'datetime-local' ? event.target : null; input?.showPicker?.() }; document.addEventListener('click', openDatePicker); return () => document.removeEventListener('click', openDatePicker) }, [])
   useEffect(() => {
     const form = [...document.querySelectorAll('form')].find(item => item.querySelector('h2')?.textContent === 'Create Assignment')
@@ -64,7 +126,7 @@ export function AssignmentsDashboard() {
     if (bottomSubmit) bottomSubmit.style.display = 'none'
     collapse()
     return () => { action.removeEventListener('click', handleAction); cancel?.removeEventListener('click', collapse); action.remove(); header.classList.remove('assignment-form-header'); assignmentActionRef.current = null }
-  }, [])
+  }, [allowed])
   useEffect(() => {
     const action = assignmentActionRef.current
     if (!action) return
@@ -78,11 +140,6 @@ export function AssignmentsDashboard() {
       delete action.dataset.idleContent
     }
   }, [saving])
-  useEffect(() => { if (!user || !allowed) return; const source = role === 'admin' ? collection(db, 'submissions') : query(collection(db, 'submissions'), where('organisationIds', 'array-contains', user.uid)); return onSnapshot(source, snapshot => setSubmissions(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as Submission).filter(item => item.gradingStatus !== 'pending')), reason => setMessage(reason.message)) }, [allowed, role, user])
-  useEffect(() => { if (!user || !allowed) return; return onSnapshot(query(collection(db, 'assignmentBatches'), where('assignedBy', '==', user.uid)), snapshot => setAssignments(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as AssignmentBatch)), reason => setMessage(reason.message)) }, [allowed, user])
-  useEffect(() => { if (!user || !allowed) return; (async () => { try { const source = role === 'admin' ? collection(db, 'organisationGroups') : query(collection(db, 'organisationGroups'), where('organisationId', '==', user.uid)); const snapshot = await getDocs(source); setGroups(await Promise.all(snapshot.docs.map(async item => ({ id: item.id, name: item.data().name as string, members: (await getDocs(collection(item.ref, 'members'))).docs.map(member => member.data() as Member) })))) } catch { setMessage('Unable to load batches.') } })() }, [allowed, role, user])
-  useEffect(() => { if (!user || !allowed) return; (async () => { try { if (role === 'admin') { const snapshot = await getDocs(query(collection(db, 'users'), where('role', '==', 'user'))); setUsers(snapshot.docs.map(item => item.data() as UserProfile)) } else { const snapshot = await getDocs(query(collection(db, 'organisationInvites'), where('organisationId', '==', user.uid))); setUsers(snapshot.docs.map(item => item.data() as { userId: string; userEmail: string; status: string }).filter(item => item.status === 'accepted').map(item => ({ uid: item.userId, email: item.userEmail, role: 'user' }))) } } catch { setMessage('Unable to load students.') } })() }, [allowed, role, user])
-  useEffect(() => { if (role !== 'organisation' || !users.some(account => !account.name)) return; let active = true; Promise.all(users.map(async account => { if (account.name) return account; const profileSnapshot = await getDoc(doc(db, 'users', account.uid)); const profileData = profileSnapshot.data() as Partial<UserProfile> | undefined; return { ...account, name: profileData?.name || account.email } })).then(enrichedUsers => { if (active) setUsers(enrichedUsers) }).catch(() => undefined); return () => { active = false } }, [role, users])
   useEffect(() => { assignmentUserDetails.clear(); users.forEach(account => assignmentUserDetails.set(account.uid, { name: account.name || account.email, email: account.email, groups: groups.filter(group => group.members.some(member => member.userId === account.uid)).map(group => group.name) })); }, [groups, users])
 
   const selectedGroup = groups.find(group => group.id === targetId)
@@ -90,6 +147,7 @@ export function AssignmentsDashboard() {
   const recipients = targetType === 'group' ? selectedGroup?.members || [] : selectedUser ? [{ userId: selectedUser.uid, userEmail: selectedUser.email }] : []
   const sorted = useMemo(() => assignments.slice().sort((a, b) => (b.createdAt?.toDate().getTime() || 0) - (a.createdAt?.toDate().getTime() || 0)), [assignments])
   const visibleAssignments = paginate(sorted, page)
+  const selectableTests = tests
   assignmentUserDetails.clear(); users.forEach(account => assignmentUserDetails.set(account.uid, { name: account.name || account.email, email: account.email, groups: groups.filter(group => group.members.some(member => member.userId === account.uid)).map(group => group.name) }))
 
   async function create(event: FormEvent) {
@@ -97,11 +155,11 @@ export function AssignmentsDashboard() {
     const test = tests.find(item => item.id === testId)
     const start = new Date(startAt)
     const end = new Date(deadline)
-    if (!user || !test || test.visibility !== 'assigned' || !name.trim() || !recipients.length || !startAt || !deadline || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start || end <= new Date() || !Number.isInteger(maxAttempts) || maxAttempts < 1) { setMessage('Enter a name, assigned test, recipient, valid date range, and at least one allowed attempt.'); return }
+    if (!user || (role !== 'admin' && !organisationId) || !test || test.visibility !== 'assigned' || !name.trim() || !recipients.length || !startAt || !deadline || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start || end <= new Date() || !Number.isInteger(maxAttempts) || maxAttempts < 1) { setMessage('Select an institute, then enter a name, assigned test, recipient, valid date range, and at least one allowed attempt.'); return }
     setSaving(true); setMessage('')
     try {
-      const batchRef = doc(collection(db, 'assignmentBatches'))
-      const taskRef = doc(collection(db, 'tasks'))
+      const assignmentBatchId = crypto.randomUUID()
+      const taskId = crypto.randomUUID()
       const response = await fetch('/api/assignments', {
         method: 'POST',
         headers: {
@@ -109,8 +167,9 @@ export function AssignmentsDashboard() {
           authorization: `Bearer ${await user.getIdToken()}`,
         },
         body: JSON.stringify({
-          assignmentBatchId: batchRef.id,
-          taskId: taskRef.id,
+          assignmentBatchId,
+          taskId,
+          organisationId: organisationId || undefined,
           name: name.trim(),
           testId: test.id,
           targetType,
@@ -124,11 +183,13 @@ export function AssignmentsDashboard() {
         const payload = await response.json().catch(() => ({})) as { error?: string }
         throw new Error(payload.error || 'Unable to create the assignment.')
       }
+      await loadManagementData()
       setName(''); setTestId(''); setTargetId(''); setStartAt(''); setDeadline(''); setMaxAttempts(1); setMessage('Assignment and task created.')
     } catch (reason) { setMessage(reason instanceof Error ? reason.message : 'Unable to create assignment.') } finally { setSaving(false) }
   }
-  if (!allowed) return <section><h1 className="text-3xl font-black">Access denied</h1><p className="mt-3 text-slate-600">Only institute and admin accounts can manage assignments.</p></section>
-  return <section><p className="text-sm font-bold tracking-widest text-indigo-600">ASSIGNMENTS</p><h1 className="mt-1 text-4xl font-black">Assignment management</h1><p className="mt-3 text-slate-600">Create test assignments and track all live and historical assignment results.</p><form onSubmit={create} className="relative mt-7 overflow-hidden rounded-2xl border border-slate-200 bg-white p-6 shadow-xl shadow-slate-200/70 sm:p-7"><div aria-hidden="true" className="pointer-events-none absolute -right-20 -top-20 h-64 w-64 rounded-full bg-indigo-50/70" /><div className="relative flex items-center gap-4 border-b border-slate-200 pb-6"><span className="grid h-14 w-14 place-items-center rounded-xl bg-indigo-50 text-indigo-600"><AssignmentIcon /></span><div><h2 className="text-2xl font-black tracking-tight text-slate-900">Create Assignment</h2><p className="mt-1 text-sm text-slate-600">Configure and assign an Assigned-mode test</p></div></div><div className="relative mt-7 grid gap-5 md:grid-cols-2 xl:grid-cols-4"><FormLabel label="Assignment name" icon={<DocumentIcon />}><input value={name} onChange={event => setName(event.target.value)} required placeholder="e.g. July mock" className="assignment-input" /></FormLabel><FormLabel label="Test" icon={<ClipboardIcon />}><select value={testId} onChange={event => setTestId(event.target.value)} required className="assignment-input"><option value="">Select an assigned test</option>{tests.map(test => <option key={test.id} value={test.id}>{test.title}</option>)}</select></FormLabel><FormLabel label="Assign to" icon={<UsersIcon />}><select value={targetType} onChange={event => { setTargetType(event.target.value as 'group' | 'user'); setTargetId('') }} className="assignment-input"><option value="group">Batch</option><option value="user">Student</option></select></FormLabel><FormLabel label={targetType === 'group' ? 'Batch' : 'Student'} icon={<UsersIcon />}><select value={targetId} onChange={event => setTargetId(event.target.value)} required className="assignment-input"><option value="">Select {targetType}</option>{targetType === 'group' ? groups.map(group => <option key={group.id} value={group.id}>{group.name} ({group.members.length})</option>) : users.map(account => <option key={account.uid} value={account.uid}>{account.email}</option>)}</select></FormLabel></div><div className="relative mt-6 grid gap-5 md:grid-cols-3"><FormLabel label="Start date" icon={<CalendarIcon />}><input value={startAt} onChange={event => setStartAt(event.target.value)} type="datetime-local" required className="assignment-input" /></FormLabel><FormLabel label="End date" icon={<CalendarIcon />}><input value={deadline} onChange={event => setDeadline(event.target.value)} type="datetime-local" min={startAt || undefined} required className="assignment-input" /></FormLabel><FormLabel label="Attempts allowed" icon={<RetryIcon />}><input value={maxAttempts} onChange={event => setMaxAttempts(Number(event.target.value))} type="number" min="1" step="1" required className="assignment-input" /></FormLabel></div><div className="relative mt-6 flex gap-3 rounded-xl bg-indigo-50 px-5 py-4 text-sm text-slate-700"><span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-indigo-600 font-bold text-white">i</span><p><b className="text-slate-900">Please review all details before creating the assignment.</b><br />Students can access it only during this window and only for the configured number of attempts.</p></div><div className="relative mt-6 flex flex-wrap justify-end gap-3 border-t border-slate-200 pt-5"><button type="button" onClick={() => { setName(''); setTestId(''); setTargetType('group'); setTargetId(''); setStartAt(''); setDeadline(''); setMaxAttempts(1); setMessage('') }} className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">Cancel</button><button disabled={saving} className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 disabled:opacity-50"><SendIcon />{saving ? 'Creating…' : 'Create assignment'}</button></div></form>{message && <p className="mt-5 rounded-xl bg-indigo-50 p-4 text-sm text-indigo-800">{message}</p>}<div className="mt-8"><h2 className="text-2xl font-black">All assignments</h2><p className="mt-1 text-sm text-slate-500">Browse assignments and open their result dashboards.</p><div className="mt-4 overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm"><AssignmentHeader />{visibleAssignments.items.map(item => <AssignmentRow key={item.id} assignment={item} submissions={submissions} open={() => setOpened(item)} />)}{!sorted.length && <p className="p-6 text-slate-500">No assignments have been created yet.</p>}<Pagination page={visibleAssignments.page} totalItems={sorted.length} onPageChange={setPage} itemLabel="assignments" /></div></div>{opened && <AssignmentModal assignment={opened} submissions={submissions} accounts={users} close={() => setOpened(null)} />}</section>
+  if (teacherOrganisationsLoading) return <p className="text-slate-500">Checking teaching permissions…</p>
+  if (!allowed) return <section><h1 className="text-3xl font-black">Access denied</h1><p className="mt-3 text-slate-600">Only institute, teacher, and admin accounts can manage assignments.</p></section>
+  return <section><p className="text-sm font-bold tracking-widest text-indigo-600">ASSIGNMENTS</p><h1 className="mt-1 text-4xl font-black">Assignment management</h1><p className="mt-3 text-slate-600">Create test assignments and track all live and historical assignment results.</p><form onSubmit={create} className="relative mt-7 overflow-hidden rounded-2xl border border-slate-200 bg-white p-6 shadow-xl shadow-slate-200/70 sm:p-7"><div aria-hidden="true" className="pointer-events-none absolute -right-20 -top-20 h-64 w-64 rounded-full bg-indigo-50/70" /><div className="relative flex items-center gap-4 border-b border-slate-200 pb-6"><span className="grid h-14 w-14 place-items-center rounded-xl bg-indigo-50 text-indigo-600"><AssignmentIcon /></span><div><h2 className="text-2xl font-black tracking-tight text-slate-900">Create Assignment</h2><p className="mt-1 text-sm text-slate-600">Configure and assign an Assigned-mode test</p></div></div>{isTeacher && <div className="relative mt-7 max-w-sm"><FormLabel label="Institute" icon={<UsersIcon />}><select value={organisationId} onChange={event => { setSelectedOrganisationId(event.target.value); setTestId(''); setTargetId(''); setTests([]); setGroups([]); setUsers([]); setSubmissions([]); setAssignments([]) }} required className="assignment-input"><option value="">Select institute</option>{teacherOrganisations.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></FormLabel></div>}<div className="relative mt-7 grid gap-5 md:grid-cols-2 xl:grid-cols-4"><FormLabel label="Assignment name" icon={<DocumentIcon />}><input value={name} onChange={event => setName(event.target.value)} required placeholder="e.g. July mock" className="assignment-input" /></FormLabel><FormLabel label="Test" icon={<ClipboardIcon />}><select value={testId} onChange={event => setTestId(event.target.value)} required className="assignment-input"><option value="">Select an assigned test</option>{selectableTests.map(test => <option key={test.id} value={test.id}>{test.title}</option>)}</select></FormLabel><FormLabel label="Assign to" icon={<UsersIcon />}><select value={targetType} onChange={event => { setTargetType(event.target.value as 'group' | 'user'); setTargetId('') }} className="assignment-input"><option value="group">Batch</option><option value="user">Student</option></select></FormLabel><FormLabel label={targetType === 'group' ? 'Batch' : 'Student'} icon={<UsersIcon />}><select value={targetId} onChange={event => setTargetId(event.target.value)} required className="assignment-input"><option value="">Select {targetType}</option>{targetType === 'group' ? groups.map(group => <option key={group.id} value={group.id}>{group.name} ({group.members.length})</option>) : users.map(account => <option key={account.uid} value={account.uid}>{account.email}</option>)}</select></FormLabel></div><div className="relative mt-6 grid gap-5 md:grid-cols-3"><FormLabel label="Start date" icon={<CalendarIcon />}><input value={startAt} onChange={event => setStartAt(event.target.value)} type="datetime-local" required className="assignment-input" /></FormLabel><FormLabel label="End date" icon={<CalendarIcon />}><input value={deadline} onChange={event => setDeadline(event.target.value)} type="datetime-local" min={startAt || undefined} required className="assignment-input" /></FormLabel><FormLabel label="Attempts allowed" icon={<RetryIcon />}><input value={maxAttempts} onChange={event => setMaxAttempts(Number(event.target.value))} type="number" min="1" step="1" required className="assignment-input" /></FormLabel></div><div className="relative mt-6 flex gap-3 rounded-xl bg-indigo-50 px-5 py-4 text-sm text-slate-700"><span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-indigo-600 font-bold text-white">i</span><p><b className="text-slate-900">Please review all details before creating the assignment.</b><br />Students can access it only during this window and only for the configured number of attempts.</p></div><div className="relative mt-6 flex flex-wrap justify-end gap-3 border-t border-slate-200 pt-5"><button type="button" onClick={() => { setName(''); setTestId(''); setTargetType('group'); setTargetId(''); setStartAt(''); setDeadline(''); setMaxAttempts(1); setMessage('') }} className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">Cancel</button><button disabled={saving || (role !== 'admin' && !organisationId)} className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 disabled:opacity-50"><SendIcon />{saving ? 'Creating…' : 'Create assignment'}</button></div></form>{message && <p className="mt-5 rounded-xl bg-indigo-50 p-4 text-sm text-indigo-800">{message}</p>}<div className="mt-8"><h2 className="text-2xl font-black">All assignments</h2><p className="mt-1 text-sm text-slate-500">Browse assignments and open their result dashboards.</p><div className="mt-4 overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm"><AssignmentHeader />{visibleAssignments.items.map(item => <AssignmentRow key={item.id} assignment={item} submissions={submissions} open={() => setOpened(item)} />)}{!sorted.length && <p className="p-6 text-slate-500">No assignments have been created yet.</p>}<Pagination page={visibleAssignments.page} totalItems={sorted.length} onPageChange={setPage} itemLabel="assignments" /></div></div>{opened && <AssignmentModal assignment={opened} submissions={submissions} accounts={users} close={() => setOpened(null)} />}</section>
 }
 
 function FormLabel({ label, icon, children }: { label: string; icon: React.ReactNode; children: React.ReactNode }) {

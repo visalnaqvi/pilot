@@ -221,6 +221,7 @@ export function OrganisationProfile({ organisationId }: { organisationId: string
           userEmail: profile.email,
           initiatedBy: 'user',
           status: 'pending',
+          memberRole: 'student',
           createdAt: serverTimestamp(),
         })
         setMessage(`Join request sent to ${organisation.name || organisation.email}.`)

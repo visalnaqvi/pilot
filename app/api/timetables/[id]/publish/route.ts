@@ -5,6 +5,7 @@ import { resolveOrganisationTaskAudience } from '@/lib/task-api'
 import { ensureTimetableAgendaJobs } from '@/lib/timetable-email-jobs'
 import { localDateKey, type TimetableInput } from '@/lib/timetable'
 import { timetableInputSchema } from '@/lib/timetable-schema'
+import { assertAcceptedTeachers } from '@/lib/attendance-api'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -50,6 +51,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       selectedUserIds: parsed.data.selectedUserIds,
       selectedGroupIds: parsed.data.selectedGroupIds,
     })
+    const teacherUserIds = [...new Set(parsed.data.entries.flatMap(entry => entry.teacherUserId ? [entry.teacherUserId] : []))]
+    await assertAcceptedTeachers(auth.user.uid, teacherUserIds)
     const expectedHash = contentHash(parsed.data)
     const result = await adminDb.runTransaction(async transaction => {
       const draft = await transaction.get(draftReference)
@@ -77,6 +80,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         timeZone,
         assignedUserIds: audience.assignees.map(assignee => assignee.userId),
         assignedGroupIds: audience.groupIds,
+        teacherUserIds,
         audienceNames: audience.audienceNames,
         revision,
         status: 'active',

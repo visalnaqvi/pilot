@@ -105,6 +105,7 @@ export function Invitations() {
           userEmail: profile.email,
           initiatedBy: 'user',
           status: 'pending',
+          memberRole: 'student',
           createdAt: serverTimestamp(),
         })
       }

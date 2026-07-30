@@ -57,3 +57,34 @@ test('learners can view their own submission and administrators can review all s
     canView: true,
   })
 })
+
+test('an authorised assignment teacher can review and grade the assignment submission', () => {
+  assert.deepEqual(resolveSubmissionAccess(
+    { uid: 'teacher-a', role: 'user' },
+    {
+      userId: 'learner',
+      gradingOwnerId: 'org-a',
+      organisationIds: ['org-a'],
+    },
+    true,
+  ), {
+    reviewer: true,
+    canView: true,
+  })
+})
+
+test('an institute teacher can view another test submission without grading it', () => {
+  assert.deepEqual(resolveSubmissionAccess(
+    { uid: 'teacher-a', role: 'user' },
+    {
+      userId: 'learner',
+      gradingOwnerId: 'org-a',
+      organisationIds: ['org-a'],
+    },
+    false,
+    true,
+  ), {
+    reviewer: false,
+    canView: true,
+  })
+})

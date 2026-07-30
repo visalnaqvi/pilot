@@ -8,8 +8,9 @@ import { SearchPicker } from './search-picker'
 import { GroupDashboardModal } from './exam-dashboard'
 import { paginate, Pagination } from './pagination'
 import type { MockTest, Submission } from './test-types'
+import { memberRole, type MemberRole } from '@/lib/membership'
 
-type Member = { userId: string; userEmail: string; status?: 'accepted' | 'pending' | 'declined' }
+type Member = { userId: string; userEmail: string; status?: 'accepted' | 'pending' | 'declined'; memberRole?: MemberRole }
 type Exam = { id: string; name: string }
 type Group = { id: string; name: string; targetExamId?: string; targetExamName?: string; members: Member[] }
 
@@ -34,7 +35,7 @@ export function OrganisationGroups() {
   const [deleting, setDeleting] = useState(false)
   const [message, setMessage] = useState('')
 
-  useEffect(() => { if (!user || !allowed) return; return onSnapshot(query(collection(db, 'organisationInvites'), where('organisationId', '==', user.uid)), snapshot => setMembers(snapshot.docs.map(item => item.data() as Member).filter(item => item.status === 'accepted'))) }, [allowed, user])
+  useEffect(() => { if (!user || !allowed) return; return onSnapshot(query(collection(db, 'organisationInvites'), where('organisationId', '==', user.uid)), snapshot => setMembers(snapshot.docs.map(item => item.data() as Member).filter(item => item.status === 'accepted' && memberRole(item.memberRole) === 'student'))) }, [allowed, user])
   useEffect(() => { if (!user || !allowed) return; return onSnapshot(collection(db, 'examCatalog'), snapshot => setExams(snapshot.docs.map(item => ({ id: item.id, name: item.data().name as string })).filter(item => item.name).sort((a, b) => a.name.localeCompare(b.name)))) }, [allowed, user])
   useEffect(() => { if (!user || !allowed) return; return onSnapshot(query(collection(db, 'submissions'), where('organisationIds', 'array-contains', user.uid)), snapshot => setSubmissions(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as Submission))) }, [allowed, user])
   useEffect(() => { if (!user || !allowed) return; void getDocs(collection(db, 'users')).then(snapshot => setUserNames(Object.fromEntries(snapshot.docs.map(item => [item.id, (item.data().name as string | undefined)?.trim() || ''])))).catch(() => setUserNames({})) }, [allowed, user])

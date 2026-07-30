@@ -7,6 +7,7 @@ import { resolveOrganisationTaskAudience } from '@/lib/task-api'
 import { ensureTaskEmailJobs } from '@/lib/task-email-jobs'
 import { taskEmailJobId } from '@/lib/task-email-plan'
 import { processTaskEmailJob } from '@/lib/task-email-worker'
+import { contentOrganisationFor } from '@/lib/teacher-access'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -21,6 +22,7 @@ const attachmentSchema = z.object({
 })
 const createTaskSchema = z.object({
   taskId: identifier,
+  organisationId: identifier.optional(),
   title: z.string().trim().min(1).max(200),
   description: z.string().trim().min(1).max(10_000),
   taskType: z.enum(['basic', 'submission']),
@@ -38,7 +40,7 @@ function queueImmediateDelivery(taskId: string) {
 }
 
 export async function POST(request: Request) {
-  const auth = await requireRole(request, ['organisation'])
+  const auth = await requireRole(request, ['user', 'organisation'])
   if ('error' in auth) return auth.error
   try {
     const body = await request.json().catch(() => null)
@@ -47,6 +49,10 @@ export async function POST(request: Request) {
       return Response.json({ error: 'Invalid task details.', issues: parsed.error.issues }, { status: 400 })
     }
     const input = parsed.data
+    const organisation = await contentOrganisationFor(auth.user, input.organisationId)
+    if (!organisation) {
+      return Response.json({ error: 'Select an institute where you are an accepted teacher.' }, { status: 403 })
+    }
     const now = new Date()
     const startAt = input.startAt ? new Date(input.startAt) : null
     const endAt = input.endAt ? new Date(input.endAt) : null
@@ -56,7 +62,9 @@ export async function POST(request: Request) {
     if (endAt && endAt <= now) {
       return Response.json({ error: 'The end time must be in the future.' }, { status: 400 })
     }
-    const expectedPrefix = `task-attachments/${auth.user.uid}/${input.taskId}/`
+    const expectedPrefix = auth.user.role === 'organisation'
+      ? `task-attachments/${organisation.id}/${input.taskId}/`
+      : `task-attachments/${organisation.id}/${input.taskId}/${auth.user.uid}/`
     if (input.attachments.some(attachment => !attachment.path.startsWith(expectedPrefix))) {
       return Response.json({ error: 'One or more attachment paths is invalid.' }, { status: 400 })
     }
@@ -78,15 +86,15 @@ export async function POST(request: Request) {
     }
 
     const audience = await resolveOrganisationTaskAudience({
-      organisationId: auth.user.uid,
+      organisationId: organisation.id,
       selectedUserIds: input.selectedUserIds,
       selectedGroupIds: input.selectedGroupIds,
     })
     await taskReference.create({
-      organisationId: auth.user.uid,
+      organisationId: organisation.id,
       createdBy: auth.user.uid,
       createdByName: auth.user.name,
-      organisationName: auth.user.name,
+      organisationName: organisation.name,
       title: input.title,
       description: input.description,
       taskType: input.taskType,

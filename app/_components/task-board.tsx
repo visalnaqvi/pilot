@@ -18,17 +18,20 @@ import { deleteObject, getDownloadURL, ref as storageRef, uploadBytes } from 'fi
 import { db, storage } from '@/lib/firebase'
 import { useAuth } from './auth-context'
 import { SearchPicker } from './search-picker'
+import { memberRole, type MemberRole } from '@/lib/membership'
+import { useTeacherOrganisations, type TeacherOrganisation } from './use-teacher-organisations'
 
 type TaskStatus = 'todo' | 'in_progress' | 'done' | 'closed'
 type TaskType = 'basic' | 'submission'
 type DateValue = { toDate: () => Date }
 type Assignee = { userId: string; userName: string; userEmail: string }
-type Member = { userId: string; userName?: string; userEmail: string; status?: string }
+type Member = { userId: string; userName?: string; userEmail: string; status?: string; memberRole?: MemberRole }
 type DirectoryUser = { name?: string; email?: string; role?: string }
 type Group = { id: string; name: string; members: Member[] }
 type Task = {
   id: string
   organisationId: string
+  createdBy: string
   title: string
   description: string
   taskType?: TaskType
@@ -91,8 +94,15 @@ const workStages = stages.filter(stage => stage.id !== 'closed')
 export function TaskBoard() {
   const { user, profile, isImpersonating } = useAuth()
   const role = profile?.role
+  const { organisations: teacherOrganisations, loading: teacherOrganisationsLoading } = useTeacherOrganisations(role === 'user' ? user : null)
+  const teacherOrganisationKey = teacherOrganisations.map(item => item.id).sort().join('|')
   const canUseTasks = role === 'organisation' || role === 'user'
-  const canCreate = role === 'organisation'
+  const canCreate = role === 'organisation' || (role === 'user' && teacherOrganisations.length > 0)
+  const workspaceRole = canCreate ? 'organisation' : role
+  const [selectedOrganisationId, setSelectedOrganisationId] = useState('')
+  const creationOrganisationId = role === 'organisation'
+    ? user?.uid || ''
+    : selectedOrganisationId || (teacherOrganisations.length === 1 ? teacherOrganisations[0].id : '')
   const [tasks, setTasks] = useState<Task[]>([])
   const [assigneeStatuses, setAssigneeStatuses] = useState<Record<string, Record<string, TaskStatus>>>({})
   const [taskSubmissions, setTaskSubmissions] = useState<Record<string, Record<string, TaskSubmission>>>({})
@@ -133,16 +143,38 @@ export function TaskBoard() {
   }, [])
 
   useEffect(() => {
-    if (!user || !canUseTasks) return
-    const taskQuery = role === 'organisation'
-      ? query(collection(db, 'tasks'), where('organisationId', '==', user.uid))
-      : query(collection(db, 'tasks'), where('assignedUserIds', 'array-contains', user.uid))
-    return onSnapshot(taskQuery, snapshot => {
-      setTasks(snapshot.docs
-        .map(item => ({ id: item.id, ...item.data() }) as Task)
-        .sort((a, b) => taskTime(b.createdAt) - taskTime(a.createdAt)))
-    }, reason => setMessage(`Could not load tasks: ${reason.message}`))
-  }, [canUseTasks, role, user])
+    if (!user || !canUseTasks || (role === 'user' && teacherOrganisationsLoading)) return
+    const updateTasks = (items: Task[]) => setTasks(items
+      .sort((a, b) => taskTime(b.createdAt) - taskTime(a.createdAt)))
+    if (role === 'organisation') {
+      return onSnapshot(
+        query(collection(db, 'tasks'), where('organisationId', '==', user.uid)),
+        snapshot => updateTasks(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as Task)),
+        reason => setMessage(`Could not load tasks: ${reason.message}`),
+      )
+    }
+    const teacherOrganisationIds = teacherOrganisationKey ? teacherOrganisationKey.split('|') : []
+    if (teacherOrganisationIds.length) {
+      const tasksByOrganisation = new Map<string, Task[]>()
+      const stops = teacherOrganisationIds.map(organisationId => onSnapshot(
+        query(
+          collection(db, 'tasks'),
+          where('organisationId', '==', organisationId),
+        ),
+        snapshot => {
+          tasksByOrganisation.set(organisationId, snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as Task))
+          updateTasks([...tasksByOrganisation.values()].flat())
+        },
+        reason => setMessage(`Could not load tasks: ${reason.message}`),
+      ))
+      return () => stops.forEach(stop => stop())
+    }
+    return onSnapshot(
+      query(collection(db, 'tasks'), where('assignedUserIds', 'array-contains', user.uid)),
+      snapshot => updateTasks(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as Task)),
+      reason => setMessage(`Could not load tasks: ${reason.message}`),
+    )
+  }, [canUseTasks, role, teacherOrganisationKey, teacherOrganisationsLoading, user])
 
   useEffect(() => {
     if (!user || !canUseTasks || isImpersonating) return
@@ -166,7 +198,7 @@ export function TaskBoard() {
   useEffect(() => {
     if (!user || !canUseTasks || !taskIds) return
     const stops = tasks.map(task => {
-      if (role === 'user') {
+      if (!canCreate) {
         const stopStatus = onSnapshot(doc(db, 'tasks', task.id, 'assignees', user.uid), snapshot => {
           setAssigneeStatuses(current => ({
             ...current,
@@ -209,33 +241,33 @@ export function TaskBoard() {
     return () => stops.forEach(stop => stop())
     // taskIds intentionally represents the task subscription set.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canUseTasks, role, taskIds, user])
+  }, [canCreate, canUseTasks, taskIds, user])
 
   useEffect(() => {
-    if (!user || !canCreate) return
+    if (!user || !canCreate || !creationOrganisationId) return
     return onSnapshot(
-      query(collection(db, 'organisationInvites'), where('organisationId', '==', user.uid)),
+      query(collection(db, 'organisationInvites'), where('organisationId', '==', creationOrganisationId)),
       snapshot => setMembers(snapshot.docs
         .map(item => item.data() as Member)
-        .filter(member => member.status === 'accepted')
+        .filter(member => member.status === 'accepted' && memberRole(member.memberRole) === 'student')
         .sort((a, b) => memberLabel(a).localeCompare(memberLabel(b)))),
       reason => setMessage(`Could not load institute students: ${reason.message}`),
     )
-  }, [canCreate, user])
+  }, [canCreate, creationOrganisationId, user])
 
   useEffect(() => {
-    if (!user || !canCreate) return
+    if (!user || role !== 'organisation') return
     return onSnapshot(collection(db, 'users'), snapshot => {
       setUserDirectory(Object.fromEntries(snapshot.docs
         .map(item => [item.id, item.data() as DirectoryUser] as const)
         .filter(([, account]) => account.role === 'user')))
     }, reason => setMessage(`Could not load student names: ${reason.message}`))
-  }, [canCreate, user])
+  }, [role, user])
 
   useEffect(() => {
-    if (!user || !canCreate) return
+    if (!user || !canCreate || !creationOrganisationId) return
     return onSnapshot(
-      query(collection(db, 'organisationGroups'), where('organisationId', '==', user.uid)),
+      query(collection(db, 'organisationGroups'), where('organisationId', '==', creationOrganisationId)),
       snapshot => {
         void Promise.all(snapshot.docs.map(async item => {
           const memberSnapshot = await getDocs(collection(item.ref, 'members'))
@@ -248,7 +280,7 @@ export function TaskBoard() {
           .catch(() => setMessage('Could not load institute batches.'))
       },
     )
-  }, [canCreate, user])
+  }, [canCreate, creationOrganisationId, user])
 
   useEffect(() => {
     if (!selectedTaskId) return
@@ -260,6 +292,8 @@ export function TaskBoard() {
   }, [selectedTaskId])
 
   const selectedTask = tasks.find(task => task.id === selectedTaskId)
+  const canManageSelectedTask = Boolean(selectedTask && user
+    && (role === 'organisation' || selectedTask.createdBy === user.uid))
 
   const resolvedMembers = useMemo(() => members.map(member => {
     const account = userDirectory[member.userId]
@@ -289,15 +323,15 @@ export function TaskBoard() {
   const visibleTasks = useMemo(() => {
     const needle = search.trim().toLowerCase()
     return tasks.filter(task => {
-      if (role === 'user' && task.sourceType !== 'assignment' && taskTime(task.startAt || undefined) > now) return false
-      if (role === 'user' && organisationFilter && task.organisationId !== organisationFilter) return false
-      if (role === 'organisation' && assigneeFilter && !task.assignedUserIds.includes(assigneeFilter)) return false
-      if (role === 'organisation' && groupFilter && !task.assignedGroupIds?.includes(groupFilter)) return false
+      if (workspaceRole === 'user' && task.sourceType !== 'assignment' && taskTime(task.startAt || undefined) > now) return false
+      if (workspaceRole === 'user' && organisationFilter && task.organisationId !== organisationFilter) return false
+      if (workspaceRole === 'organisation' && assigneeFilter && !task.assignedUserIds.includes(assigneeFilter)) return false
+      if (workspaceRole === 'organisation' && groupFilter && !task.assignedGroupIds?.includes(groupFilter)) return false
       if (taskTypeFilter === 'assignment' && task.sourceType !== 'assignment') return false
       if (taskTypeFilter && taskTypeFilter !== 'assignment' && (task.sourceType === 'assignment' || (task.taskType || 'basic') !== taskTypeFilter)) return false
       return !needle || `${task.title} ${task.description} ${task.organisationName || task.createdByName || ''} ${(task.audienceNames || []).join(' ')} ${(task.assignedUsers || []).map(item => `${item.userName} ${item.userEmail}`).join(' ')}`.toLowerCase().includes(needle)
     })
-  }, [assigneeFilter, groupFilter, now, organisationFilter, role, search, taskTypeFilter, tasks])
+  }, [assigneeFilter, groupFilter, now, organisationFilter, search, taskTypeFilter, tasks, workspaceRole])
 
   const organisationOptions = useMemo(() => [...new Map(tasks.map(task => [
     task.organisationId,
@@ -327,7 +361,7 @@ export function TaskBoard() {
 
   const statusForTask = (task: Task): TaskStatus => {
     if (task.isClosed || (task.sourceType === 'assignment' && taskTime(task.endAt || undefined) > 0 && taskTime(task.endAt || undefined) <= now)) return 'closed'
-    if (role === 'user' && user) return assigneeStatuses[task.id]?.[user.uid] || task.status || 'todo'
+    if (workspaceRole === 'user' && user) return assigneeStatuses[task.id]?.[user.uid] || task.status || 'todo'
     const statuses = task.assignedUserIds.map(userId => assigneeStatuses[task.id]?.[userId] || task.status || 'todo')
     if (statuses.length && statuses.every(status => status === 'done' || status === 'closed')) return 'done'
     if (statuses.some(status => status === 'in_progress' || status === 'done' || status === 'closed')) return 'in_progress'
@@ -343,8 +377,8 @@ export function TaskBoard() {
 
   async function createTask(event: FormEvent) {
     event.preventDefault()
-    if (!user || !canCreate || !title.trim() || !description.trim() || !chosenAssignees.length) {
-      setMessage('Add a title, description, and at least one assigned student or batch.')
+    if (!user || !canCreate || !creationOrganisationId || !title.trim() || !description.trim() || !chosenAssignees.length) {
+      setMessage('Select an institute, then add a title, description, and at least one assigned student or batch.')
       return
     }
     const startDate = startAt ? new Date(startAt) : null
@@ -369,7 +403,9 @@ export function TaskBoard() {
       for (const file of files) {
         const id = crypto.randomUUID()
         const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-120) || 'attachment'
-        const path = `task-attachments/${user.uid}/${ref.id}/${id}-${safeName}`
+        const path = role === 'organisation'
+          ? `task-attachments/${creationOrganisationId}/${ref.id}/${id}-${safeName}`
+          : `task-attachments/${creationOrganisationId}/${ref.id}/${user.uid}/${id}-${safeName}`
         await uploadBytes(storageRef(storage, path), file, { contentType: file.type || 'application/octet-stream' })
         uploadedAttachments.push({ id, name: file.name, path, size: file.size, contentType: file.type || 'application/octet-stream' })
       }
@@ -381,6 +417,7 @@ export function TaskBoard() {
         },
         body: JSON.stringify({
           taskId: ref.id,
+          organisationId: creationOrganisationId,
           title: title.trim(),
           description: description.trim(),
           taskType,
@@ -407,30 +444,34 @@ export function TaskBoard() {
 
   async function moveTask(task: Task, status: TaskStatus, targetUserId?: string) {
     if (!user || movingId || task.isClosed) return
-    if (role === 'user' && task.sourceType === 'assignment') {
+    if (workspaceRole === 'organisation' && role === 'user' && task.createdBy !== user.uid) {
+      setMessage('You can view this task, but only its creator can change student progress.')
+      return
+    }
+    if (workspaceRole === 'user' && task.sourceType === 'assignment') {
       setMessage('Assignment task progress updates automatically when you start and submit the test.')
       return
     }
-    if (role === 'user' && taskTime(task.startAt || undefined) > now) {
+    if (workspaceRole === 'user' && taskTime(task.startAt || undefined) > now) {
       setMessage('This task has not started yet.')
       return
     }
-    if (role === 'user' && taskTime(task.endAt || undefined) > 0 && taskTime(task.endAt || undefined) <= now) {
+    if (workspaceRole === 'user' && taskTime(task.endAt || undefined) > 0 && taskTime(task.endAt || undefined) <= now) {
       setMessage('The deadline has passed. Only the institute can change this task now.')
       return
     }
-    const assigneeId = role === 'user' ? user.uid : targetUserId
+    const assigneeId = workspaceRole === 'user' ? user.uid : targetUserId
     if (!assigneeId) return
     if ((task.taskType || 'basic') === 'submission' && status === 'done' && !taskSubmissions[task.id]?.[assigneeId]) {
       setMessage('A submission file is required before this task can move to Done.')
       return
     }
     const currentStatus = assigneeStatuses[task.id]?.[assigneeId] || task.status || 'todo'
-    if (status === 'closed' && (role !== 'organisation' || currentStatus !== 'done')) {
+    if (status === 'closed' && (workspaceRole !== 'organisation' || currentStatus !== 'done')) {
       setMessage('Only the institute can close an individual task after that student reaches Done.')
       return
     }
-    if (currentStatus === 'closed' && role !== 'organisation') return
+    if (currentStatus === 'closed' && workspaceRole !== 'organisation') return
     if (currentStatus === status) return
     const assignee = task.assignedUsers?.find(item => item.userId === assigneeId)
     const assigneeName = assignee?.userName || assignee?.userEmail || 'Assigned student'
@@ -527,7 +568,7 @@ export function TaskBoard() {
   }
 
   async function setTaskClosed(task: Task, closed: boolean) {
-    if (!user || role !== 'organisation' || movingId) return
+    if (!user || !canCreate || movingId || (role === 'user' && task.createdBy !== user.uid)) return
     if (closed && !allUsersComplete(task)) {
       setMessage('Every assigned student must be Done or individually Closed before the complete task can be closed.')
       return
@@ -553,7 +594,8 @@ export function TaskBoard() {
   }
 
   async function deleteTask() {
-    if (!user || role !== 'organisation' || !deleteTarget || deleteConfirmation !== deleteTarget.title) return
+    if (!user || !canCreate || !deleteTarget || deleteConfirmation !== deleteTarget.title
+      || (role === 'user' && deleteTarget.createdBy !== user.uid)) return
     setDeleting(true)
     setMessage('')
     try {
@@ -591,6 +633,10 @@ export function TaskBoard() {
   async function addComment(event: FormEvent) {
     event.preventDefault()
     if (!user || !selectedTask || !comment.trim()) return
+    if (workspaceRole === 'organisation' && !canManageSelectedTask) {
+      setMessage('You can view this task, but only its creator can add institute comments.')
+      return
+    }
     setSaving(true)
     setMessage('')
     try {
@@ -633,17 +679,17 @@ export function TaskBoard() {
       {canCreate && <button type="button" onClick={() => { setFormOpen(true); setMessage('') }} className="rounded-xl bg-indigo-600 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700">+ Create task</button>}
     </header>
 
-    <div className={`mt-7 grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm lg:grid-cols-2 lg:items-center ${role === 'organisation' ? 'xl:grid-cols-[minmax(0,1fr)_minmax(11rem,.4fr)_minmax(13rem,.5fr)_minmax(12rem,.45fr)_auto]' : 'xl:grid-cols-[minmax(0,1fr)_minmax(12rem,.45fr)_minmax(14rem,.55fr)_auto]'}`}>
+    <div className={`mt-7 grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm lg:grid-cols-2 lg:items-center ${workspaceRole === 'organisation' ? 'xl:grid-cols-[minmax(0,1fr)_minmax(11rem,.4fr)_minmax(13rem,.5fr)_minmax(12rem,.45fr)_auto]' : 'xl:grid-cols-[minmax(0,1fr)_minmax(12rem,.45fr)_minmax(14rem,.55fr)_auto]'}`}>
       <label className="flex min-w-0 flex-1 items-center gap-3 rounded-xl border border-slate-300 bg-slate-50 px-4 py-2.5 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-100">
         <span aria-hidden="true" className="text-slate-400">⌕</span>
         <span className="sr-only">Search tasks</span>
         <input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search tasks, students, or batches" className="min-w-0 flex-1 bg-transparent text-sm outline-none" />
       </label>
       <SearchPicker value={taskTypeFilter} options={[{ id: '', label: 'All task types' }, { id: 'basic', label: 'Basic' }, { id: 'submission', label: 'Submission' }, { id: 'assignment', label: 'Assignment' }]} onChange={option => setTaskTypeFilter(option.id)} placeholder="Filter by task type" />
-      {role === 'user'
+      {workspaceRole === 'user'
         ? <SearchPicker value={organisationFilter} options={[{ id: '', label: 'All institutes', detail: `${organisationOptions.length} institutes` }, ...organisationOptions]} onChange={option => setOrganisationFilter(option.id)} placeholder="Filter by institute" />
         : <SearchPicker value={assigneeFilter} options={[{ id: '', label: 'All students', detail: `${assigneeOptions.length} students` }, ...assigneeOptions]} onChange={option => setAssigneeFilter(option.id)} placeholder="Search and filter by student" />}
-      {role === 'organisation' && <SearchPicker value={groupFilter} options={[{ id: '', label: 'All batches', detail: `${groupOptions.length} batches` }, ...groupOptions]} onChange={option => setGroupFilter(option.id)} placeholder="Search and filter by batch" />}
+      {workspaceRole === 'organisation' && <SearchPicker value={groupFilter} options={[{ id: '', label: 'All batches', detail: `${groupOptions.length} batches` }, ...groupOptions]} onChange={option => setGroupFilter(option.id)} placeholder="Search and filter by batch" />}
       <div className="flex items-center justify-end gap-3">
         <p className="text-sm font-semibold text-slate-500">{displayedTasks.length} task{displayedTasks.length === 1 ? '' : 's'}</p>
         <button type="button" aria-pressed={showClosed} aria-label={showClosed ? 'Show active tasks' : 'Show closed tasks'} title={showClosed ? 'Show active tasks' : 'Show closed tasks'} onClick={() => setShowClosed(current => !current)} className={`grid h-10 w-10 place-items-center rounded-xl border text-lg font-black transition ${showClosed ? 'border-violet-300 bg-violet-100 text-violet-700 hover:bg-violet-200' : 'border-slate-300 bg-white text-slate-600 hover:border-violet-300 hover:bg-violet-50 hover:text-violet-700'}`}>
@@ -663,7 +709,7 @@ export function TaskBoard() {
           onDragOver={event => event.preventDefault()}
           onDrop={event => {
             event.preventDefault()
-            if (role !== 'user' || !user || stage.id === 'closed') return
+            if (workspaceRole !== 'user' || !user || stage.id === 'closed') return
             const task = tasks.find(item => item.id === event.dataTransfer.getData('text/task-id'))
             if (task) void moveTask(task, stage.id, user.uid)
           }}
@@ -679,7 +725,7 @@ export function TaskBoard() {
               key={task.id}
               task={task}
               stageIndex={stages.findIndex(item => item.id === stage.id)}
-              role={role}
+              role={workspaceRole}
               now={now}
               frozen={taskTime(task.endAt || undefined) > 0 && taskTime(task.endAt || undefined) <= now}
               aggregateStatuses={assigneeStatuses[task.id] || {}}
@@ -707,11 +753,18 @@ export function TaskBoard() {
       files={files}
       assigneeCount={chosenAssignees.length}
       saving={saving}
+      organisations={role === 'user' ? teacherOrganisations : []}
+      organisationId={creationOrganisationId}
       setTitle={setTitle}
       setDescription={setDescription}
       setTaskType={setTaskType}
       setStartAt={setStartAt}
       setEndAt={setEndAt}
+      setOrganisationId={id => {
+        setSelectedOrganisationId(id)
+        setSelectedUserIds([])
+        setSelectedGroupIds([])
+      }}
       toggleUser={id => setSelectedUserIds(current => toggleId(current, id))}
       toggleGroup={id => setSelectedGroupIds(current => toggleId(current, id))}
       setFiles={setFiles}
@@ -722,12 +775,13 @@ export function TaskBoard() {
     {selectedTask && <TaskDetailDialog
       task={selectedTask}
       comments={comments}
-      role={role}
+      role={workspaceRole}
+      canManage={canManageSelectedTask}
       currentUserId={user?.uid || ''}
       now={now}
       assigneeStatuses={assigneeStatuses[selectedTask.id] || {}}
       submissions={taskSubmissions[selectedTask.id] || {}}
-      userFrozen={role === 'user' && taskTime(selectedTask.endAt || undefined) > 0 && taskTime(selectedTask.endAt || undefined) <= now}
+      userFrozen={workspaceRole === 'user' && taskTime(selectedTask.endAt || undefined) > 0 && taskTime(selectedTask.endAt || undefined) <= now}
       memberDirectory={resolvedMembers}
       comment={comment}
       saving={saving}
@@ -824,11 +878,14 @@ function CreateTaskDialog(props: {
   files: File[]
   assigneeCount: number
   saving: boolean
+  organisations: TeacherOrganisation[]
+  organisationId: string
   setTitle: (value: string) => void
   setDescription: (value: string) => void
   setTaskType: (value: TaskType) => void
   setStartAt: (value: string) => void
   setEndAt: (value: string) => void
+  setOrganisationId: (value: string) => void
   toggleUser: (id: string) => void
   toggleGroup: (id: string) => void
   setFiles: (files: File[]) => void
@@ -865,6 +922,7 @@ function CreateTaskDialog(props: {
         <button type="button" onClick={props.close} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold">Close</button>
       </header>
       <div className="space-y-6 p-6">
+        {!!props.organisations.length && <label className="block text-sm font-bold text-slate-800">Institute <span className="text-rose-500">*</span><select value={props.organisationId} onChange={event => props.setOrganisationId(event.target.value)} required className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 font-normal outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"><option value="">Select institute</option>{props.organisations.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}
         <label className="block text-sm font-bold text-slate-800">Title <span className="text-rose-500">*</span><input autoFocus required value={props.title} onChange={event => props.setTitle(event.target.value)} placeholder="e.g. Review quantitative aptitude notes" className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 font-normal outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" /></label>
         <fieldset>
           <legend className="text-sm font-bold text-slate-800">Task type <span className="text-rose-500">*</span></legend>
@@ -915,16 +973,17 @@ function CreateTaskDialog(props: {
       </div>
       <footer className="sticky bottom-0 flex items-center justify-between gap-4 border-t border-slate-200 bg-white px-6 py-5">
         <p className="text-sm font-bold text-slate-600">{props.assigneeCount} unique assignee{props.assigneeCount === 1 ? '' : 's'}</p>
-        <div className="flex gap-3"><button type="button" onClick={props.close} className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-bold text-slate-700">Cancel</button><button disabled={props.saving || !props.assigneeCount} className="rounded-xl bg-indigo-600 px-5 py-3 text-sm font-bold text-white disabled:opacity-50">{props.saving ? 'Creating…' : 'Create task'}</button></div>
+        <div className="flex gap-3"><button type="button" onClick={props.close} className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-bold text-slate-700">Cancel</button><button disabled={props.saving || !props.organisationId || !props.assigneeCount} className="rounded-xl bg-indigo-600 px-5 py-3 text-sm font-bold text-white disabled:opacity-50">{props.saving ? 'Creating…' : 'Create task'}</button></div>
       </footer>
     </form>
   </div>
 }
 
-function TaskDetailDialog({ task, comments, role, currentUserId, now, assigneeStatuses, submissions, userFrozen, memberDirectory, comment, saving, movingId, setComment, move, addComment, submitFile, submitting, toggleClosed, requestDelete, close }: {
+function TaskDetailDialog({ task, comments, role, canManage, currentUserId, now, assigneeStatuses, submissions, userFrozen, memberDirectory, comment, saving, movingId, setComment, move, addComment, submitFile, submitting, toggleClosed, requestDelete, close }: {
   task: Task
   comments: Comment[]
   role?: string
+  canManage: boolean
   currentUserId: string
   now: number
   assigneeStatuses: Record<string, TaskStatus>
@@ -1005,11 +1064,11 @@ function TaskDetailDialog({ task, comments, role, currentUserId, now, assigneeSt
             {comments.map(item => <article key={item.id} className="flex gap-3"><Initial name={item.authorName} /><div className="min-w-0 flex-1 rounded-xl bg-slate-50 px-4 py-3"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-black text-slate-900">{item.authorName} <span className="ml-1 rounded-full bg-white px-2 py-0.5 text-[10px] font-bold uppercase text-slate-500">{item.authorRole}</span></p><time className="text-[11px] font-semibold text-slate-400">{formatDate(item.createdAt, true)}</time></div><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">{item.body}</p></div></article>)}
             {!comments.length && <p className="rounded-xl border-2 border-dashed border-slate-200 p-6 text-center text-sm text-slate-500">No comments yet. Start the conversation.</p>}
           </div>
-          <form onSubmit={addComment} className="mt-5">
+          {(role === 'user' || canManage) && <form onSubmit={addComment} className="mt-5">
             <label className="sr-only" htmlFor="task-comment">Add a comment</label>
             <textarea id="task-comment" value={comment} onChange={event => setComment(event.target.value)} rows={3} maxLength={5000} placeholder="Write a comment…" className="w-full resize-y rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" />
             <div className="mt-2 flex justify-end"><button disabled={saving || !comment.trim()} className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white disabled:opacity-50">{saving ? 'Adding…' : 'Add comment'}</button></div>
-          </form>
+          </form>}
         </div>
       </section>
       <aside className="min-h-0 border-t border-slate-200 bg-slate-50 p-6 lg:overflow-y-auto lg:border-l lg:border-t-0">
@@ -1041,7 +1100,7 @@ function TaskDetailDialog({ task, comments, role, currentUserId, now, assigneeSt
           </div>}
           <div className="mt-7"><p className="text-xs font-black tracking-wider text-slate-400">INSTITUTE</p><p className="mt-2 text-sm font-bold text-indigo-700">{task.organisationName || task.createdByName || 'Institute'}</p></div>
         </>}
-        {role === 'organisation' && <>
+        {role === 'organisation' && canManage && <>
           <button type="button" disabled={movingId === `close:${task.id}` || (!task.isClosed && !allAssigneesComplete)} onClick={() => toggleClosed(!task.isClosed)} className={`w-full rounded-xl px-4 py-3 text-sm font-black disabled:cursor-not-allowed disabled:opacity-40 ${task.isClosed ? 'border border-violet-300 bg-white text-violet-700 hover:bg-violet-50' : 'bg-violet-600 text-white hover:bg-violet-700'}`}>{movingId === `close:${task.id}` ? 'Updating…' : task.isClosed ? 'Reopen complete task' : 'Close complete task'}</button>
           {!task.isClosed && !allAssigneesComplete && <p className="mt-2 text-xs font-semibold leading-5 text-slate-500">Available after every student is Done or individually Closed.</p>}
         </>}
@@ -1065,7 +1124,9 @@ function TaskDetailDialog({ task, comments, role, currentUserId, now, assigneeSt
             return <div key={assignee.userId} className={`grid min-w-0 grid-cols-[auto_minmax(0,1fr)_7rem] items-center gap-x-3 gap-y-2 ${role === 'organisation' ? 'rounded-xl border border-slate-200 bg-white p-3' : ''}`}>
               <Initial name={displayName} />
               <div className="min-w-0"><p className="truncate text-sm font-bold text-slate-800">{displayName}</p><p className="truncate text-xs text-slate-500">{assignee.userEmail}</p></div>
-              {role === 'organisation' && <select aria-label={`Status for ${displayName}`} value={assigneeStatus} disabled={task.isClosed || movingId === `${task.id}:${assignee.userId}`} onChange={event => move(event.target.value as TaskStatus, assignee.userId)} className={`w-28 rounded-lg border px-2 py-2 text-xs font-bold outline-none focus:border-indigo-500 disabled:bg-slate-100 disabled:text-slate-400 ${assigneeStatus === 'closed' ? 'border-violet-300 bg-violet-50 text-violet-700' : 'border-slate-300 bg-white'}`}>{stages.map(stage => <option key={stage.id} value={stage.id} disabled={(task.taskType === 'submission' && stage.id === 'done' && !submissions[assignee.userId]) || (stage.id === 'closed' && assigneeStatus !== 'done' && assigneeStatus !== 'closed')}>{stage.label}{stage.id === 'closed' && assigneeStatus !== 'done' && assigneeStatus !== 'closed' ? ' · Done required' : ''}</option>)}</select>}
+              {role === 'organisation' && (canManage
+                ? <select aria-label={`Status for ${displayName}`} value={assigneeStatus} disabled={task.isClosed || movingId === `${task.id}:${assignee.userId}`} onChange={event => move(event.target.value as TaskStatus, assignee.userId)} className={`w-28 rounded-lg border px-2 py-2 text-xs font-bold outline-none focus:border-indigo-500 disabled:bg-slate-100 disabled:text-slate-400 ${assigneeStatus === 'closed' ? 'border-violet-300 bg-violet-50 text-violet-700' : 'border-slate-300 bg-white'}`}>{stages.map(stage => <option key={stage.id} value={stage.id} disabled={(task.taskType === 'submission' && stage.id === 'done' && !submissions[assignee.userId]) || (stage.id === 'closed' && assigneeStatus !== 'done' && assigneeStatus !== 'closed')}>{stage.label}{stage.id === 'closed' && assigneeStatus !== 'done' && assigneeStatus !== 'closed' ? ' · Done required' : ''}</option>)}</select>
+                : <span className="w-28 rounded-lg bg-slate-100 px-2 py-2 text-center text-xs font-bold text-slate-600">{stages.find(stage => stage.id === assigneeStatus)?.label || 'To do'}</span>)}
               {role === 'organisation' && task.taskType === 'submission' && (submissions[assignee.userId] ? <button type="button" title={submissions[assignee.userId].attachment.name} onClick={() => void openAttachment(submissions[assignee.userId].attachment)} className="col-span-2 col-start-2 w-fit max-w-full whitespace-nowrap rounded-full bg-emerald-50 px-2 py-1 leading-none text-emerald-700 hover:bg-emerald-100"><span className="text-xs font-semibold">View submission</span></button> : <p className="col-span-2 col-start-2 text-xs font-semibold text-amber-600">Awaiting file</p>)}
             </div>
           })}
@@ -1074,7 +1135,7 @@ function TaskDetailDialog({ task, comments, role, currentUserId, now, assigneeSt
         </div>
         {!!task.audienceNames?.length && <div className="mt-7"><p className="text-xs font-black tracking-wider text-slate-400">AUDIENCE</p><div className="mt-3 flex flex-wrap gap-2">{task.audienceNames.map(name => <span key={name} className="rounded-full bg-indigo-100 px-2.5 py-1 text-xs font-bold text-indigo-700">{name}</span>)}</div></div>}
         <dl className="mt-7 space-y-4 border-t border-slate-200 pt-6 text-sm">{task.startAt && <div><dt className="text-xs font-black tracking-wider text-slate-400">START TIME</dt><dd className="mt-1 font-semibold text-slate-700">{formatDate(task.startAt, true)}</dd></div>}{task.endAt && <div><dt className="text-xs font-black tracking-wider text-slate-400">DEADLINE</dt><dd className="mt-1 font-semibold text-slate-700">{formatDate(task.endAt, true)}</dd></div>}<div><dt className="text-xs font-black tracking-wider text-slate-400">CREATED</dt><dd className="mt-1 font-semibold text-slate-700">{formatDate(task.createdAt, true)}</dd></div><div><dt className="text-xs font-black tracking-wider text-slate-400">LAST UPDATED</dt><dd className="mt-1 font-semibold text-slate-700">{formatDate(task.updatedAt, true)}</dd></div></dl>
-        {role === 'organisation' && <button type="button" onClick={requestDelete} className="mt-7 w-full rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-black text-rose-700 hover:bg-rose-100">Delete task</button>}
+        {role === 'organisation' && canManage && <button type="button" onClick={requestDelete} className="mt-7 w-full rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-black text-rose-700 hover:bg-rose-100">Delete task</button>}
       </aside>
     </div>
   </div>

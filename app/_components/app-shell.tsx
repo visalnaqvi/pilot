@@ -5,19 +5,31 @@ import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { signOut } from 'firebase/auth'
 import { auth } from '@/lib/firebase'
+import { db } from '@/lib/firebase'
+import { collection, onSnapshot, query, where } from 'firebase/firestore'
 import { useAuth } from './auth-context'
 import { NotificationPanel } from './notification-panel'
 import { PendingJoinRequestsBanner } from './pending-join-requests-banner'
+import { memberRole } from '@/lib/membership'
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { user, profile, actualProfile, ready, isImpersonating, stopImpersonating } = useAuth()
   const router = useRouter()
   const pathname = usePathname()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const [canTeach, setCanTeach] = useState(false)
 
   useEffect(() => {
     if (ready && !user) router.replace('/login')
   }, [ready, router, user])
+  useEffect(() => {
+    if (!user || profile?.role !== 'user') return
+    return onSnapshot(
+      query(collection(db, 'organisationInvites'), where('userId', '==', user.uid), where('status', '==', 'accepted')),
+      snapshot => setCanTeach(snapshot.docs.some(document => memberRole(document.data().memberRole) === 'teacher')),
+      () => setCanTeach(false),
+    )
+  }, [profile?.role, user])
   useEffect(() => {
     if (!mobileMenuOpen) return
     const previousOverflow = document.body.style.overflow
@@ -37,10 +49,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   const role = profile?.role ?? 'user'
-  const roleLabel = role === 'organisation' ? 'Institute' : role
+  const teacherMember = role === 'user' && canTeach
+  const roleLabel = role === 'organisation' ? 'Institute' : teacherMember ? 'Teacher' : role
   const canManage = role === 'admin' || role === 'organisation'
+  const canCreateContent = canManage || teacherMember
   const organisationProfileId = profile?.uid || user.uid
-  const workPath = pathname === '/assignments' || pathname === '/tasks' || pathname === '/timetables' || pathname === '/calendar'
+  const workPath = pathname === '/assignments' || pathname === '/tasks' || pathname === '/timetables' || pathname === '/calendar' || pathname === '/attendance' || pathname === '/my-classes'
   const testPath = pathname === '/tests'
     || pathname.startsWith('/tests/')
     || pathname === '/manage/tests'
@@ -50,7 +64,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     || pathname.startsWith('/admin/')
     || pathname === '/invitations'
   const isTakingTest = /^\/tests\/[^/]+$/.test(pathname) && pathname !== '/tests/create'
-  const workHref = canManage ? '/assignments' : role === 'user' ? '/tasks' : '/calendar'
+  const workHref = canManage ? '/assignments' : teacherMember ? '/my-classes' : role === 'user' ? '/tasks' : '/calendar'
   const manageHref = role === 'organisation'
     ? '/organisation/groups'
     : role === 'admin'
@@ -164,9 +178,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {workPath && (
             <nav aria-label="Work workspace" className="mb-7 overflow-x-auto border-b border-slate-200">
               <div className="flex min-w-max gap-1 px-1">
-                {canManage && <Link href="/assignments" className={workspaceTab('/assignments')}>Assignments</Link>}
+                {canCreateContent && <Link href="/assignments" className={workspaceTab('/assignments')}>Assignments</Link>}
+                {teacherMember && <Link href="/my-classes" className={workspaceTab('/my-classes')}>My Classes</Link>}
                 {(role === 'organisation' || role === 'user') && <Link href="/tasks" className={workspaceTab('/tasks')}>Tasks</Link>}
                 {(role === 'organisation' || role === 'user') && <Link href="/timetables" className={workspaceTab('/timetables')}>Timetables</Link>}
+                {(role === 'organisation' || role === 'user') && <Link href="/attendance" className={workspaceTab('/attendance')}>Attendance</Link>}
                 <Link href="/calendar" className={workspaceTab('/calendar')}>Calendar</Link>
               </div>
             </nav>
@@ -176,7 +192,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <nav aria-label="Test workspace" className="mb-7 overflow-x-auto border-b border-slate-200">
               <div className="flex min-w-max gap-1 px-1">
                 <Link href="/tests" className={workspaceTab('/tests')}>Tests</Link>
-                {canManage && <Link href="/manage/tests" className={workspaceTab('/manage/tests')}>Manage tests</Link>}
+                {canCreateContent && <Link href="/manage/tests" className={workspaceTab('/manage/tests')}>Manage tests</Link>}
                 {canManage && <Link href="/manage/tests/generate" className={workspaceTab('/manage/tests/generate')}>AI generator</Link>}
                 <Link href="/submissions" className={workspaceTab('/submissions')}>Submissions</Link>
               </div>

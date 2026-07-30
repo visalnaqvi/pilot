@@ -12,9 +12,20 @@ service firebase.storage {
     function isAdmin() {
       return signedIn() && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role == 'admin';
     }
+    function isAcceptedTeacher(organisationId) {
+      return signedIn()
+        && firestore.exists(/databases/(default)/documents/organisationInvites/$(organisationId + '_' + request.auth.uid))
+        && firestore.get(/databases/(default)/documents/organisationInvites/$(organisationId + '_' + request.auth.uid)).data.status == 'accepted'
+        && firestore.get(/databases/(default)/documents/organisationInvites/$(organisationId + '_' + request.auth.uid)).data.memberRole == 'teacher';
+    }
+    function canManageTask(task) {
+      return (isOrganisation() && task.organisationId == request.auth.uid)
+        || (task.createdBy == request.auth.uid && isAcceptedTeacher(task.organisationId));
+    }
     function canReadTask(taskId) {
       let task = firestore.get(/databases/(default)/documents/tasks/$(taskId)).data;
-      return signedIn() && (isAdmin() || (isOrganisation() && task.organisationId == request.auth.uid)
+      return signedIn() && (isAdmin() || canManageTask(task)
+        || isAcceptedTeacher(task.organisationId)
         || request.auth.uid in task.assignedUserIds);
     }
     function taskUserWindowOpen(taskId) {
@@ -26,6 +37,14 @@ service firebase.storage {
     match /question-images/{userId}/{allPaths=**} {
       allow read: if signedIn();
       allow write: if canCreateTests() && request.auth.uid == userId && request.resource.size < 5 * 1024 * 1024 && request.resource.contentType.matches('image/.*');
+    }
+
+    match /question-images/{organisationId}/{userId}/{allPaths=**} {
+      allow read: if signedIn();
+      allow write: if request.auth.uid == userId
+        && ((isOrganisation() && request.auth.uid == organisationId) || isAcceptedTeacher(organisationId))
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
     }
 
     match /test-generation-sources/{organisationId}/{jobId}/{allPaths=**} {
@@ -51,17 +70,16 @@ service firebase.storage {
 
     match /task-attachments/{organisationId}/{taskId}/{allPaths=**} {
       allow read: if canReadTask(taskId);
-      allow create: if isOrganisation()
-        && request.auth.uid == organisationId
+      allow create: if ((isOrganisation() && request.auth.uid == organisationId) || isAcceptedTeacher(organisationId))
         && request.resource.size <= 20 * 1024 * 1024;
-      allow delete: if isOrganisation() && request.auth.uid == organisationId;
+      allow delete: if canManageTask(firestore.get(/databases/(default)/documents/tasks/$(taskId)).data);
       allow update: if false;
     }
 
     match /task-submissions/{organisationId}/{taskId}/{userId}/{allPaths=**} {
       allow read: if signedIn()
-        && (isAdmin() || (isOrganisation()
-            && firestore.get(/databases/(default)/documents/tasks/$(taskId)).data.organisationId == request.auth.uid)
+        && (isAdmin() || canManageTask(firestore.get(/databases/(default)/documents/tasks/$(taskId)).data)
+          || isAcceptedTeacher(firestore.get(/databases/(default)/documents/tasks/$(taskId)).data.organisationId)
           || (request.auth.uid == userId
             && request.auth.uid in firestore.get(/databases/(default)/documents/tasks/$(taskId)).data.assignedUserIds));
       allow create: if signedIn()
@@ -72,7 +90,7 @@ service firebase.storage {
         && taskUserWindowOpen(taskId)
         && request.auth.uid in firestore.get(/databases/(default)/documents/tasks/$(taskId)).data.assignedUserIds
         && request.resource.size <= 20 * 1024 * 1024;
-      allow delete: if (isOrganisation() && request.auth.uid == organisationId)
+      allow delete: if canManageTask(firestore.get(/databases/(default)/documents/tasks/$(taskId)).data)
         || (signedIn()
           && request.auth.uid == userId
           && !firestore.exists(/databases/(default)/documents/tasks/$(taskId)/submissions/$(userId)));

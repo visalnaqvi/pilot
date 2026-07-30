@@ -3,6 +3,7 @@ import { errorResponse, requireRole } from '@/lib/admin-api'
 import { adminDb, FieldValue } from '@/lib/firebase-admin'
 import { resolveSubmissionAccess } from '@/lib/submission-access'
 import type { CanonicalQuestion } from '@/lib/submission-scoring'
+import { isTeacherForOrganisation } from '@/lib/teacher-access'
 
 export const runtime = 'nodejs'
 
@@ -29,7 +30,24 @@ async function access(
   if (!submissionSnapshot.exists || !submission) {
     return { error: Response.json({ error: 'Submission not found.' }, { status: 404 }) } as const
   }
-  const { reviewer, canView } = resolveSubmissionAccess(auth.user, submission)
+  let teacherReviewer = false
+  let teacherViewer = false
+  if (auth.user.role === 'user' && typeof submission.assignmentBatchId === 'string') {
+    const assignment = await adminDb.collection('assignmentBatches').doc(submission.assignmentBatchId).get()
+    const organisationId = String(assignment.data()?.organisationId || '')
+    teacherReviewer = assignment.data()?.assignedBy === auth.user.uid
+      && Boolean(organisationId)
+      && await isTeacherForOrganisation(auth.user.uid, organisationId)
+  }
+  if (auth.user.role === 'user' && typeof submission.testId === 'string') {
+    const test = await adminDb.collection('tests').doc(submission.testId).get()
+    const organisationId = String(test.data()?.organisationId || '')
+    const organisationIds = Array.isArray(submission.organisationIds) ? submission.organisationIds : []
+    teacherViewer = Boolean(organisationId)
+      && organisationIds.includes(organisationId)
+      && await isTeacherForOrganisation(auth.user.uid, organisationId)
+  }
+  const { reviewer, canView } = resolveSubmissionAccess(auth.user, submission, teacherReviewer, teacherViewer)
   if (!canView) {
     return { error: Response.json({ error: 'You do not have access to this submission.' }, { status: 403 }) } as const
   }

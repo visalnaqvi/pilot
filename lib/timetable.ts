@@ -6,6 +6,7 @@ export type TimetableEntry = {
   weekday?: number
   startTime: string
   endTime: string
+  teacherUserId?: string
   teacher?: string
   location?: string
   meetingUrl?: string

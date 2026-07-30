@@ -50,6 +50,10 @@ test('timetable schema validates dates, audiences, URLs, and internal overlaps',
     ...valid,
     entries: [{ ...monday, meetingUrl: 'javascript:alert(1)' }],
   }).success, false)
+  assert.equal(timetableInputSchema.safeParse({
+    ...valid,
+    entries: [{ ...monday, teacherUserId: 'teacher-1', teacher: 'Teacher One' }],
+  }).success, true)
 
   const overlapping = [
     monday,

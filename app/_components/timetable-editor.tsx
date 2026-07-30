@@ -18,6 +18,7 @@ export function TimetableEditor(props: {
   input: TimetableInput
   groups: Group[]
   members: Member[]
+  teachers: Member[]
   assigneeCount: number
   saving: boolean
   publishing: boolean
@@ -61,6 +62,7 @@ export function TimetableEditor(props: {
       startTime,
       endTime,
       teacher: '',
+      teacherUserId: undefined,
       location: '',
       meetingUrl: '',
       notes: '',
@@ -185,6 +187,7 @@ export function TimetableEditor(props: {
 
     {classDraft && <ClassEditorDialog
       entry={classDraft}
+      teachers={props.teachers}
       existing={props.input.entries.some(entry => entry.id === classDraft.id)}
       error={classError}
       setEntry={setClassDraft}
@@ -251,6 +254,7 @@ function InteractiveWeekCalendar({ entries, addClass, editClass }: {
 
 function ClassEditorDialog(props: {
   entry: TimetableEntry
+  teachers: Member[]
   existing: boolean
   error: string
   setEntry: (entry: TimetableEntry) => void
@@ -270,7 +274,10 @@ function ClassEditorDialog(props: {
         })}</div></fieldset>
         <label className="text-sm font-bold">Starts <span className="text-rose-500">*</span><input type="time" step="1800" value={props.entry.startTime} onChange={event => update({ startTime: event.target.value })} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 font-normal" /></label>
         <label className="text-sm font-bold">Ends <span className="text-rose-500">*</span><input type="time" step="1800" value={props.entry.endTime} onChange={event => update({ endTime: event.target.value })} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 font-normal" /></label>
-        <label className="text-sm font-bold">Teacher <span className="font-normal text-slate-400">(optional)</span><input value={props.entry.teacher || ''} onChange={event => update({ teacher: event.target.value })} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 font-normal" /></label>
+        <label className="text-sm font-bold">Teacher <span className="font-normal text-slate-400">(optional)</span><select value={props.entry.teacherUserId || ''} onChange={event => {
+          const teacher = props.teachers.find(item => item.userId === event.target.value)
+          update({ teacherUserId: teacher?.userId, teacher: teacher ? memberName(teacher) : props.entry.teacherUserId ? '' : props.entry.teacher || '' })
+        }} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 font-normal"><option value="">{props.entry.teacher && !props.entry.teacherUserId ? `Unlinked: ${props.entry.teacher}` : 'No assigned teacher'}</option>{props.teachers.map(teacher => <option key={teacher.userId} value={teacher.userId}>{memberName(teacher)}</option>)}</select>{!props.teachers.length && <span className="mt-1 block text-xs font-normal text-slate-500">Promote a joined student to teacher before assigning them here.</span>}</label>
         <label className="text-sm font-bold">Room or location <span className="font-normal text-slate-400">(optional)</span><input value={props.entry.location || ''} onChange={event => update({ location: event.target.value })} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 font-normal" /></label>
         <label className="sm:col-span-2 text-sm font-bold">Meeting link <span className="font-normal text-slate-400">(optional)</span><input type="url" value={props.entry.meetingUrl || ''} onChange={event => update({ meetingUrl: event.target.value })} placeholder="https://…" className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 font-normal" /></label>
         <label className="sm:col-span-2 text-sm font-bold">Notes <span className="font-normal text-slate-400">(optional)</span><textarea rows={3} value={props.entry.notes || ''} onChange={event => update({ notes: event.target.value })} className="mt-2 w-full resize-y rounded-xl border border-slate-300 px-4 py-3 font-normal" /></label>

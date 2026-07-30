@@ -1,8 +1,78 @@
 import { errorResponse, requireRole } from '@/lib/admin-api'
 import { adminDb, FieldValue } from '@/lib/firebase-admin'
 import { type CanonicalQuestion, questionSnapshot, scoreResponses, SubmitTestSchema } from '@/lib/submission-scoring'
+import { isTeacherForOrganisation } from '@/lib/teacher-access'
 
 export const runtime = 'nodejs'
+
+function submissionSummary(snapshot: FirebaseFirestore.QueryDocumentSnapshot) {
+  const data = snapshot.data()
+  return {
+    id: snapshot.id,
+    userId: data.userId,
+    userEmail: data.userEmail,
+    userName: data.userName,
+    testId: data.testId,
+    testTitle: data.testTitle,
+    testExam: data.testExam,
+    testExamId: data.testExamId,
+    testCategory: data.testCategory,
+    score: data.score,
+    gradingStatus: data.gradingStatus,
+    mcqScore: data.mcqScore,
+    mcqMarks: data.mcqMarks,
+    pendingMarks: data.pendingMarks,
+    totalMarks: data.totalMarks,
+    correctAnswers: data.correctAnswers,
+    questionCount: data.questionCount,
+    organisationIds: data.organisationIds,
+    autoSubmitted: data.autoSubmitted,
+    autoSubmitReason: data.autoSubmitReason,
+    testVisibility: data.testVisibility,
+    attemptNumber: data.attemptNumber,
+    assignmentBatchId: data.assignmentBatchId,
+    submittedAt: data.submittedAt?.toDate?.()?.toISOString?.() || null,
+  }
+}
+
+export async function GET(request: Request) {
+  const auth = await requireRole(request, ['user', 'organisation', 'admin'])
+  if ('error' in auth) return auth.error
+  try {
+    const testId = new URL(request.url).searchParams.get('testId')?.trim() || ''
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(testId)) {
+      return Response.json({ error: 'A valid test is required.' }, { status: 400 })
+    }
+    const testSnapshot = await adminDb.collection('tests').doc(testId).get()
+    const test = testSnapshot.data()
+    if (!testSnapshot.exists || !test || test.deletedAt != null) {
+      return Response.json({ error: 'Test not found.' }, { status: 404 })
+    }
+    const organisationId = String(test.organisationId || '')
+    let scope: 'all' | 'institute' | 'self' = 'self'
+    if (auth.user.role === 'admin') {
+      scope = 'all'
+    } else if (auth.user.role === 'organisation' && organisationId === auth.user.uid) {
+      scope = 'institute'
+    } else if (auth.user.role === 'user' && organisationId
+      && await isTeacherForOrganisation(auth.user.uid, organisationId)) {
+      scope = 'institute'
+    }
+    const snapshot = await adminDb.collection('submissions').where('testId', '==', testId).get()
+    const submissions = snapshot.docs
+      .filter(document => document.data().gradingStatus !== 'pending')
+      .filter(document => {
+        if (scope === 'all') return true
+        if (scope === 'self') return document.data().userId === auth.user.uid
+        return Array.isArray(document.data().organisationIds)
+          && document.data().organisationIds.includes(organisationId)
+      })
+      .map(submissionSummary)
+    return Response.json({ submissions, scope })
+  } catch (error) {
+    return errorResponse(error, 'Unable to load test submissions.')
+  }
+}
 
 async function loadCanonicalQuestions(testId: string, test: FirebaseFirestore.DocumentData) {
   if (Array.isArray(test.questions)) {

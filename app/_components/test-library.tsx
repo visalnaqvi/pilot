@@ -11,8 +11,9 @@ import { SearchPicker } from './search-picker'
 import { TestDashboardModal } from './exam-dashboard'
 import { paginate, Pagination } from './pagination'
 import type { MockTest } from './test-types'
+import { memberRole, type MemberRole } from '@/lib/membership'
 
-type Invite = { organisationId: string; status: 'pending' | 'accepted' | 'declined' }
+type Invite = { organisationId: string; status: 'pending' | 'accepted' | 'declined'; memberRole?: MemberRole }
 type LibraryTest = MockTest & { assignmentBatchId?: string; assignmentName?: string; assignmentAttemptsUsed?: number; assignmentMaxAttempts?: number; assignmentStartAt?: { toDate: () => Date }; assignmentDeadline?: { toDate: () => Date } }
 type UserAssignment = { assignmentBatchId?: string; assignmentName?: string; testId: string; userId: string; attemptsUsed?: number; maxAttempts?: number; startAt?: { toDate: () => Date }; deadline: { toDate: () => Date } }
 
@@ -28,12 +29,14 @@ const count = (test: MockTest) => ({
 export function TestLibrary() {
   const { user, profile } = useAuth()
   const role = profile?.role
-  const canManage = role === 'admin' || role === 'organisation'
+  const [teacherMember, setTeacherMember] = useState(false)
+  const canManage = role === 'admin' || role === 'organisation' || teacherMember
   const [publicTests, setPublicTests] = useState<MockTest[]>([])
   const [privateTests, setPrivateTests] = useState<MockTest[]>([])
   const [assignedTests, setAssignedTests] = useState<LibraryTest[]>([])
   const [userAssignments, setUserAssignments] = useState<UserAssignment[]>([])
   const [organisationIds, setOrganisationIds] = useState<string[]>([])
+  const [teacherOrganisationIds, setTeacherOrganisationIds] = useState<string[]>([])
   const [organisationNames, setOrganisationNames] = useState<Record<string, string>>({})
   const [exam, setExam] = useState('')
   const [category, setCategory] = useState('')
@@ -110,10 +113,15 @@ export function TestLibrary() {
     if (!user || role !== 'user') return
     return onSnapshot(
       query(collection(db, 'organisationInvites'), where('userId', '==', user.uid)),
-      snapshot => setOrganisationIds(snapshot.docs
-        .map(item => item.data() as Invite)
-        .filter(item => item.status === 'accepted')
-        .map(item => item.organisationId)),
+      snapshot => {
+        const invites = snapshot.docs.map(item => item.data() as Invite).filter(item => item.status === 'accepted')
+        setOrganisationIds(invites.map(item => item.organisationId))
+        const teacherIds = invites
+          .filter(item => memberRole(item.memberRole) === 'teacher')
+          .map(item => item.organisationId)
+        setTeacherOrganisationIds(teacherIds)
+        setTeacherMember(teacherIds.length > 0)
+      },
       reason => setError(reason.message),
     )
   }, [role, user])
@@ -171,6 +179,24 @@ export function TestLibrary() {
     if (role === 'organisation') {
       return onSnapshot(query(collection(db, 'tests'), where('visibility', '==', 'assigned'), where('createdBy', '==', user.uid), where('deletedAt', '==', null)), snapshot => setAssignedTests(byNewest(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as LibraryTest))), reason => setError(reason.message))
     }
+    if (role === 'user' && teacherMember) {
+      let active = true
+      Promise.all(teacherOrganisationIds.map(id => getDocs(query(
+        collection(db, 'tests'),
+        where('organisationId', '==', id),
+        where('visibility', '==', 'assigned'),
+        where('deletedAt', '==', null),
+      ))))
+        .then(snapshots => {
+          if (active) setAssignedTests(byNewest(snapshots.flatMap(snapshot => (
+            snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as LibraryTest)
+          ))))
+        })
+        .catch(reason => {
+          if (active) setError(reason.message)
+        })
+      return () => { active = false }
+    }
     if (role !== 'user') return
     void user.getIdToken().then(token => fetch('/api/test-session?list=assignments', {
       headers: { authorization: `Bearer ${token}` },
@@ -182,7 +208,7 @@ export function TestLibrary() {
         .filter(item => !!item.assignmentBatchId && item.id === assignmentInstanceId(item.assignmentBatchId, user.uid))),
       reason => setError(reason.message),
     )
-  }, [role, user])
+  }, [role, teacherMember, teacherOrganisationIds, user])
 
   useEffect(() => {
     if (!user || role !== 'user') return

@@ -15,6 +15,7 @@ import { ExamResolver } from './exam-resolver'
 import type { ExamCatalogEntry, ExamSelectionStatus } from '@/lib/exam-catalog'
 import { scopeDashboardExams } from '@/lib/exam-dashboard-scope'
 import { toDate, type ExamCatalogSummary } from '@/lib/exam-information'
+import { AttendanceOverviewCard, StudentAttendancePanel } from './attendance-summary-card'
 
 type Exam = ExamCatalogSummary
 type Group = { id: string;
@@ -31,7 +32,7 @@ attempts: number;
 students: number;
 average: number;
 completion: number }
-type ModalTab = 'details' | 'scores' | 'users' | 'groups' | 'goals'
+type ModalTab = 'details' | 'scores' | 'users' | 'groups' | 'goals' | 'attendance'
 const score = (item: Submission) => item.totalMarks ? item.score / item.totalMarks * 100 : 0
 const isUnreadExam = (exam: Exam, lastSeen: unknown) => {
   const published = toDate(exam.lastPublishedAt)
@@ -132,6 +133,7 @@ return { exam, tests: examTests.length, groups: examGroups.length, groupUsers: g
 </div>
 {examNotice && <p role="status" className="mt-5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-800">{examNotice}</p>}
 <DashboardOverview exams={exams} tests={tests} groups={groups} submissions={submissions} />
+{role === 'organisation' && <AttendanceOverviewCard />}
 <label className="mt-8 block max-w-md text-sm font-bold">Focus on an exam<div className="mt-2 font-normal"><SearchPicker value={filter} options={[{ id: '', label: role === 'admin' ? 'All catalog exams' : 'All institute exams' }, ...exams.map(exam => ({ id: exam.id, label: exam.name }))]} onChange={option => { setFilter(option.id); setPage(1) }} placeholder="Search exams" /></div><select value={filter} onChange={e => { setFilter(e.target.value); setPage(1) }} className="hidden" aria-hidden="true" tabIndex={-1}>
 <option value="">{role === 'admin' ? 'All catalog exams' : 'All institute exams'}</option>{exams.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}</select>
 </label>{error && <p className="mt-5 rounded-xl bg-rose-50 p-4 text-sm text-rose-700">Could not fully load dashboard data: {error}</p>}<div className="mt-6 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -501,15 +503,38 @@ export function TestDashboardModal({ test, close }: { test: MockTest; close: () 
   const [error, setError] = useState('')
   useEffect(() => {
     if (!user || !profile) return
+    if (profile.role === 'user') {
+      let active = true
+      void user.getIdToken().then(async token => {
+        const response = await fetch(`/api/test-submissions?testId=${encodeURIComponent(test.id)}`, {
+          headers: { authorization: `Bearer ${token}` },
+        })
+        const payload = await response.json().catch(() => ({})) as {
+          submissions?: Array<Omit<Submission, 'submittedAt'> & { submittedAt?: string | null }>
+          error?: string
+        }
+        if (!response.ok) throw new Error(payload.error || 'Unable to load test dashboard data.')
+        if (!active) return
+        setSubmissions((payload.submissions || []).map(item => {
+          const { submittedAt, ...submission } = item
+          return {
+            ...submission,
+            ...(submittedAt ? { submittedAt: { toDate: () => new Date(submittedAt) } } : {}),
+          }
+        }))
+      }).catch(reason => {
+        if (active) setError(reason instanceof Error ? reason.message : 'Unable to load test dashboard data.')
+      })
+      return () => { active = false }
+    }
     const source = profile.role === 'admin'
       ? query(collection(db, 'submissions'), where('testId', '==', test.id))
-      : profile.role === 'organisation'
-        ? query(collection(db, 'submissions'), where('testId', '==', test.id), where('organisationIds', 'array-contains', user.uid))
-        : query(collection(db, 'submissions'), where('testId', '==', test.id), where('userId', '==', user.uid))
+      : query(collection(db, 'submissions'), where('testId', '==', test.id), where('organisationIds', 'array-contains', user.uid))
     return onSnapshot(source, snapshot => setSubmissions(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as Submission).filter(item => item.gradingStatus !== 'pending')), reason => setError(reason.message))
   }, [profile, test.id, user])
   const [tab, setTab] = useState<ModalTab>('scores')
-  const canEdit = profile?.role === 'admin' || (profile?.role === 'organisation' && test.createdBy === user?.uid)
+  const canEdit = profile?.role === 'admin'
+    || ((profile?.role === 'organisation' || profile?.role === 'user') && test.createdBy === user?.uid)
   const students = new Set(submissions.map(item => item.userId)).size
   const average = submissions.length ? submissions.reduce((sum, item) => sum + score(item), 0) / submissions.length : 0
   const stats: ExamStats = { exam: { id: test.id, name: test.title }, tests: 1, groups: 0, groupUsers: students, attempts: submissions.length, students, average, completion: 0 }
@@ -540,9 +565,9 @@ export function OrganisationUserDashboardModal({ account, submissions, tests, go
   const userTests = tests.filter(test => attempts.some(item => item.testId === test.id))
   const average = attempts.length ? attempts.reduce((sum, item) => sum + score(item), 0) / attempts.length : 0
   const stats: ExamStats = { exam: { id: account.uid, name: account.name }, tests: userTests.length, groups: goals.length, groupUsers: 1, attempts: attempts.length, students: attempts.length ? 1 : 0, average, completion: 0 }
-  const tabs = [['scores', 'Score analysis'], ['goals', 'Exam goal progress']] as const
+  const tabs = [['scores', 'Score analysis'], ['goals', 'Exam goal progress'], ['attendance', 'Attendance']] as const
   if (tab === 'scores') return <ScoreAnalysisModal stats={stats} attempts={attempts} tests={userTests} tabs={tabs} setTab={setTab} close={close} dashboardLabel="STUDENT DASHBOARD" dashboardName={account.name} scopeLabel="user" />
-  return <DashboardModalShell label="STUDENT DASHBOARD" name={account.name} activeTab={tab} tabs={tabs} setTab={setTab} close={close}><ExamGoalProgress goals={goals} attempts={attempts} tests={tests} /></DashboardModalShell>
+  return <DashboardModalShell label="STUDENT DASHBOARD" name={account.name} activeTab={tab} tabs={tabs} setTab={setTab} close={close}>{tab === 'attendance' ? <StudentAttendancePanel studentId={account.uid} /> : <ExamGoalProgress goals={goals} attempts={attempts} tests={tests} />}</DashboardModalShell>
 }
 
 function ExamGoalProgress({ goals, attempts, tests }: { goals: { id: string; name: string; examId?: string; examName?: string }[]; attempts: Submission[]; tests: MockTest[] }) {

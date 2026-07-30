@@ -13,6 +13,8 @@ import { addDays, daysForTimetableEntry, timetableWeekdays, type TimetableEntry 
 import { useAuth, type UserProfile } from './auth-context'
 import { AssignmentModal, type AssignmentBatch } from './assignments-dashboard'
 import type { Submission } from './test-types'
+import { memberRole } from '@/lib/membership'
+import { useTeacherOrganisations } from './use-teacher-organisations'
 
 type UserAssignment = { id: string; assignmentBatchId?: string; testId: string; testTitle: string; assignmentName?: string; attemptsUsed?: number; maxAttempts?: number; startAt?: { toDate: () => Date }; deadline: { toDate: () => Date }; createdAt?: { toDate: () => Date } }
 type DateValue = { toDate: () => Date }
@@ -53,8 +55,12 @@ function stateOf(assignment: { startAt?: { toDate: () => Date }; deadline: { toD
 export function AssignmentCalendarDashboard() {
   const { user, profile } = useAuth()
   const role = profile?.role
-  const manager = role === 'admin' || role === 'organisation'
-  const learner = role === 'user'
+  const { organisations: teacherOrganisations, loading: teacherOrganisationsLoading } = useTeacherOrganisations(role === 'user' ? user : null)
+  const teacherOrganisationKey = teacherOrganisations.map(item => item.id).sort().join('|')
+  const isTeacher = role === 'user' && teacherOrganisations.length > 0
+  const instituteManager = role === 'admin' || role === 'organisation'
+  const manager = instituteManager || isTeacher
+  const learner = role === 'user' && !teacherOrganisationsLoading && !isTeacher
   const [assignments, setAssignments] = useState<AssignmentBatch[]>([])
   const [userAssignments, setUserAssignments] = useState<UserAssignment[]>([])
   const [tasks, setTasks] = useState<CalendarTask[]>([])
@@ -72,8 +78,24 @@ export function AssignmentCalendarDashboard() {
 
   useEffect(() => {
     if (!user || !manager) return
-    return onSnapshot(query(collection(db, 'assignmentBatches'), where('assignedBy', '==', user.uid)), snapshot => setAssignments(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as AssignmentBatch)), reason => setMessage(reason.message))
-  }, [manager, user])
+    if (role === 'admin') {
+      return onSnapshot(collection(db, 'assignmentBatches'), snapshot => setAssignments(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as AssignmentBatch)), reason => setMessage(reason.message))
+    }
+    if (role === 'organisation') {
+      return onSnapshot(query(collection(db, 'assignmentBatches'), where('organisationId', '==', user.uid)), snapshot => setAssignments(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as AssignmentBatch)), reason => setMessage(reason.message))
+    }
+    const organisationIds = teacherOrganisationKey ? teacherOrganisationKey.split('|') : []
+    const byOrganisation = new Map<string, AssignmentBatch[]>()
+    const stops = organisationIds.map(organisationId => onSnapshot(
+      query(collection(db, 'assignmentBatches'), where('organisationId', '==', organisationId)),
+      snapshot => {
+        byOrganisation.set(organisationId, snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as AssignmentBatch))
+        setAssignments([...byOrganisation.values()].flat())
+      },
+      reason => setMessage(reason.message),
+    ))
+    return () => stops.forEach(stop => stop())
+  }, [manager, role, teacherOrganisationKey, user])
   useEffect(() => {
     if (!user || !learner) return
     void user.getIdToken().then(token => fetch('/api/test-session?list=assignments', {
@@ -85,30 +107,118 @@ export function AssignmentCalendarDashboard() {
   }, [learner, user])
   useEffect(() => {
     if (!user || (role !== 'organisation' && role !== 'user')) return
-    const taskQuery = role === 'organisation'
-      ? query(collection(db, 'tasks'), where('organisationId', '==', user.uid))
-      : query(collection(db, 'tasks'), where('assignedUserIds', 'array-contains', user.uid))
-    return onSnapshot(taskQuery, snapshot => setTasks(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as CalendarTask)), reason => setMessage(reason.message))
-  }, [role, user])
+    if (role === 'user' && teacherOrganisationsLoading) return
+    if (role === 'organisation') {
+      return onSnapshot(
+        query(collection(db, 'tasks'), where('organisationId', '==', user.uid)),
+        snapshot => setTasks(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as CalendarTask)),
+        reason => setMessage(reason.message),
+      )
+    }
+    const teacherOrganisationIds = teacherOrganisationKey ? teacherOrganisationKey.split('|') : []
+    if (teacherOrganisationIds.length) {
+      const tasksByOrganisation = new Map<string, CalendarTask[]>()
+      const stops = teacherOrganisationIds.map(organisationId => onSnapshot(
+        query(
+          collection(db, 'tasks'),
+          where('organisationId', '==', organisationId),
+        ),
+        snapshot => {
+          tasksByOrganisation.set(organisationId, snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as CalendarTask))
+          setTasks([...tasksByOrganisation.values()].flat())
+        },
+        reason => setMessage(reason.message),
+      ))
+      return () => stops.forEach(stop => stop())
+    }
+    return onSnapshot(
+      query(collection(db, 'tasks'), where('assignedUserIds', 'array-contains', user.uid)),
+      snapshot => setTasks(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as CalendarTask)),
+      reason => setMessage(reason.message),
+    )
+  }, [role, teacherOrganisationKey, teacherOrganisationsLoading, user])
   useEffect(() => {
-    if (!user || !role) return
-    const timetableQuery = role === 'admin'
-      ? collection(db, 'timetables')
-      : role === 'organisation'
-        ? query(collection(db, 'timetables'), where('organisationId', '==', user.uid))
-        : query(collection(db, 'timetables'), where('assignedUserIds', 'array-contains', user.uid))
-    return onSnapshot(timetableQuery, snapshot => setTimetables(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as CalendarTimetable)), reason => setMessage(reason.message))
-  }, [role, user])
-  useEffect(() => { if (!user || !manager) return; const source = role === 'admin' ? collection(db, 'submissions') : query(collection(db, 'submissions'), where('organisationIds', 'array-contains', user.uid)); return onSnapshot(source, snapshot => setSubmissions(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as Submission)), reason => setMessage(reason.message)) }, [manager, role, user])
+    if (!user || !role || (role === 'user' && teacherOrganisationsLoading)) return
+    if (role === 'admin') {
+      return onSnapshot(collection(db, 'timetables'), snapshot => setTimetables(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as CalendarTimetable)), reason => setMessage(reason.message))
+    }
+    if (role === 'organisation') {
+      return onSnapshot(query(collection(db, 'timetables'), where('organisationId', '==', user.uid)), snapshot => setTimetables(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as CalendarTimetable)), reason => setMessage(reason.message))
+    }
+    const teacherOrganisationIds = teacherOrganisationKey ? teacherOrganisationKey.split('|') : []
+    if (teacherOrganisationIds.length) {
+      const timetablesByOrganisation = new Map<string, CalendarTimetable[]>()
+      const stops = teacherOrganisationIds.map(organisationId => onSnapshot(
+        query(
+          collection(db, 'timetables'),
+          where('organisationId', '==', organisationId),
+        ),
+        snapshot => {
+          timetablesByOrganisation.set(organisationId, snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as CalendarTimetable))
+          setTimetables([...timetablesByOrganisation.values()].flat())
+        },
+        reason => setMessage(reason.message),
+      ))
+      return () => stops.forEach(stop => stop())
+    }
+    return onSnapshot(
+      query(collection(db, 'timetables'), where('assignedUserIds', 'array-contains', user.uid)),
+      snapshot => setTimetables(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as CalendarTimetable)),
+      reason => setMessage(reason.message),
+    )
+  }, [role, teacherOrganisationKey, teacherOrganisationsLoading, user])
+  useEffect(() => { if (!user || !instituteManager) return; const source = role === 'admin' ? collection(db, 'submissions') : query(collection(db, 'submissions'), where('organisationIds', 'array-contains', user.uid)); return onSnapshot(source, snapshot => setSubmissions(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as Submission)), reason => setMessage(reason.message)) }, [instituteManager, role, user])
+  const assignmentIds = assignments.map(item => item.id).sort().join('|')
   useEffect(() => {
-    if (!user || !manager) return
+    if (!user || !isTeacher) return
+    const ids = assignmentIds ? assignmentIds.split('|') : []
+    if (!ids.length) {
+      void Promise.resolve().then(() => setSubmissions([]))
+      return
+    }
+    void Promise.all(Array.from({ length: Math.ceil(ids.length / 30) }, (_, index) => (
+      getDocs(query(collection(db, 'submissions'), where('assignmentBatchId', 'in', ids.slice(index * 30, index * 30 + 30))))
+    )))
+      .then(snapshots => setSubmissions(snapshots.flatMap(snapshot => snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as Submission))))
+      .catch(reason => setMessage(reason instanceof Error ? reason.message : 'Unable to load assignment results.'))
+  }, [assignmentIds, isTeacher, user])
+  useEffect(() => {
+    if (!user || !instituteManager) return
     void (async () => {
       try {
         const snapshot = role === 'admin' ? await getDocs(query(collection(db, 'users'), where('role', '==', 'user'))) : await getDocs(query(collection(db, 'organisationInvites'), where('organisationId', '==', user.uid)))
         setAccounts(role === 'admin' ? snapshot.docs.map(item => ({ uid: item.id, ...item.data() }) as UserProfile) : snapshot.docs.map(item => item.data() as { userId: string; userEmail: string; status: string }).filter(item => item.status === 'accepted').map(item => ({ uid: item.userId, email: item.userEmail, role: 'user' })))
       } catch { setMessage('Unable to load assignment students.') }
     })()
-  }, [manager, role, user])
+  }, [instituteManager, role, user])
+  useEffect(() => {
+    if (!user || !isTeacher) return
+    const organisationIds = teacherOrganisationKey ? teacherOrganisationKey.split('|') : []
+    let active = true
+    void Promise.all(organisationIds.map(organisationId => getDocs(query(
+      collection(db, 'organisationInvites'),
+      where('organisationId', '==', organisationId),
+    ))))
+      .then(snapshots => {
+        if (!active) return
+        const uniqueAccounts = new Map<string, UserProfile>()
+        snapshots.flatMap(snapshot => snapshot.docs).forEach(document => {
+          const membership = document.data() as { userId: string; userEmail: string; userName?: string; status: string; memberRole?: unknown }
+          if (membership.status !== 'accepted' || memberRole(membership.memberRole) !== 'student') return
+          uniqueAccounts.set(membership.userId, {
+            uid: membership.userId,
+            email: membership.userEmail,
+            name: membership.userName,
+            role: 'user',
+          })
+        })
+        setAccounts([...uniqueAccounts.values()])
+      })
+      .catch(() => {
+        if (active) setMessage('Unable to load assignment students.')
+      })
+    return () => { active = false }
+  }, [isTeacher, teacherOrganisationKey, user])
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60_000)
     return () => window.clearInterval(timer)
@@ -121,6 +231,7 @@ export function AssignmentCalendarDashboard() {
     return () => compact.removeEventListener('change', syncView)
   }, [])
 
+  if (teacherOrganisationsLoading) return <p className="text-slate-500">Checking teaching permissions...</p>
   if (!manager && !learner) return <section><h1 className="text-3xl font-black">Access denied</h1></section>
   const assignmentSource = manager ? assignments : userAssignments
   const assignmentEvents = assignmentSource.map(assignment => {
@@ -141,7 +252,8 @@ export function AssignmentCalendarDashboard() {
   })
   const timetableEvents = timetables
     .filter(timetable => timetable.status === 'active')
-    .flatMap(timetable => timetable.entries.map(entry => ({
+    .flatMap(timetable => timetable.entries
+      .map(entry => ({
       id: `timetable:${timetable.id}:${entry.id}`,
       title: entry.subject,
       daysOfWeek: daysForTimetableEntry(entry),

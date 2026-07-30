@@ -10,6 +10,7 @@ import { SearchPicker } from './search-picker'
 import { paginate, Pagination } from './pagination'
 import { SubmissionReviewButton } from './submission-answers-modal'
 import type { Submission } from './test-types'
+import { AttendanceOverviewCard } from './attendance-summary-card'
 
 type TestInfo = {
   exam: string
@@ -171,6 +172,7 @@ export function UserDashboard() {
       <DashboardMetric icon="accuracy" label="Answer accuracy" value={filtered.length ? `${Math.round(insights.accuracy)}%` : '—'} note="Correct answers across tests" />
       <DashboardMetric icon="organisation" label="Joined institutes" value={organisations.length} note="Filter by institute in exam details" />
     </div>
+    <AttendanceOverviewCard student />
 
     {error && <p className="mt-5 rounded-xl bg-rose-50 p-4 text-sm text-rose-700">Could not fully load your dashboard data: {error}</p>}
 

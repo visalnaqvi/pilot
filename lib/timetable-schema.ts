@@ -11,6 +11,7 @@ export const timetableEntrySchema = z.object({
   weekday: z.number().int().min(0).max(6).optional(),
   startTime: z.string().refine(validTime, 'Enter a valid start time.'),
   endTime: z.string().refine(validTime, 'Enter a valid end time.'),
+  teacherUserId: identifier.optional(),
   teacher: optionalText(160),
   location: optionalText(300),
   meetingUrl: optionalText(2_000).refine(value => {

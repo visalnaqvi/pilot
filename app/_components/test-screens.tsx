@@ -13,6 +13,7 @@ import { MathText, MathTextEditor } from './math-components'
 import { SearchPicker } from './search-picker'
 import type { LearnerQuestion, MockTest, QuestionBankItem, QuestionContent, QuestionFormat, TestQuestion } from './test-types'
 import type { ExamCatalogEntry } from '@/lib/exam-catalog'
+import { useTeacherOrganisations } from './use-teacher-organisations'
 
 type DraftQuestion = { key: string;
 questionId?: string;
@@ -73,6 +74,7 @@ initialTest?: MockTest }) {
   const [description, setDescription] = useState(initialTest?.description || '')
   const [duration, setDuration] = useState(initialTest?.durationMinutes || 30)
   const [visibility, setVisibility] = useState<'public' | 'private' | 'assigned'>(initialTest?.visibility || 'public')
+  const [organisationId, setOrganisationId] = useState(initialTest?.organisationId || '')
   const [exams, setExams] = useState<Exam[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [addingExam, setAddingExam] = useState(false)
@@ -80,10 +82,23 @@ initialTest?: MockTest }) {
   const [questions, setQuestions] = useState<DraftQuestion[]>([])
   const [message, setMessage] = useState('')
   const [saving, setSaving] = useState(false)
-  const allowed = profile?.role === 'admin' || profile?.role === 'organisation'
+  const { organisations: teacherOrganisations, loading: teacherOrganisationsLoading } = useTeacherOrganisations(profile?.role === 'user' ? user : null)
+  const isTeacher = profile?.role === 'user' && (
+    initialTest
+      ? teacherOrganisations.some(item => item.id === initialTest.organisationId)
+      : teacherOrganisations.length > 0
+  )
+  const allowed = profile?.role === 'admin' || profile?.role === 'organisation' || isTeacher
+  const contentOrganisationId = initialTest?.organisationId
+    || (profile?.role === 'organisation' ? user?.uid || '' : organisationId)
+    || (teacherOrganisations.length === 1 ? teacherOrganisations[0].id : '')
+  const contentVisibility = isTeacher && visibility === 'public' ? 'assigned' : visibility
   const marks = useMemo(() => questions.reduce((total, item) => total + Number(item.marks || 0), 0), [questions])
   const examOptions = useMemo(() => [...exams].sort((a, b) => a.name.localeCompare(b.name)), [exams])
-  const categoryOptions = useMemo(() => categories.filter((item) => item.examId === examId).sort((a, b) => a.name.localeCompare(b.name)), [categories, examId])
+  const categoryOptions = useMemo(() => categories
+    .filter(item => item.examId === examId)
+    .filter(item => profile?.role === 'admin' || item.organisationId === contentOrganisationId)
+    .sort((a, b) => a.name.localeCompare(b.name)), [categories, contentOrganisationId, examId, profile?.role])
   const selectedExam = exams.find((item) => item.id === examId)
   const selectedCategory = categories.find((item) => item.id === categoryIdValue && item.examId === examId)
 
@@ -151,7 +166,11 @@ return }
     if (!file.type.startsWith('image/')) throw new Error('Please select an image file.')
     if (file.size > 5 * 1024 * 1024) throw new Error('Images must be 5 MB or smaller.')
     const extension = file.name.split('.').pop()?.replace(/[^a-zA-Z0-9]/g, '') || 'image'
-    const imageRef = ref(storage, `question-images/${user.uid}/${questionKey}/${slot}-${crypto.randomUUID()}.${extension}`)
+    if (profile?.role !== 'admin' && !contentOrganisationId) throw new Error('Select an institute before uploading question images.')
+    const imagePath = profile?.role === 'admin'
+      ? `question-images/${user.uid}/${questionKey}/${slot}-${crypto.randomUUID()}.${extension}`
+      : `question-images/${contentOrganisationId}/${user.uid}/${questionKey}/${slot}-${crypto.randomUUID()}.${extension}`
+    const imageRef = ref(storage, imagePath)
     await uploadBytes(imageRef, file, { contentType: file.type })
     return getDownloadURL(imageRef)
   }
@@ -159,7 +178,7 @@ return }
   async function addCategory(categoryName: string) {
     const name = categoryName.trim()
     const id = categoryId(name)
-    if (!name || !id || !user || !examId) { setMessage('Select an exam, then enter a valid category name.');
+    if (!name || !id || !user || !examId || (profile?.role !== 'admin' && !contentOrganisationId)) { setMessage('Select an institute and exam, then enter a valid category name.');
 return }
     try {
       const ownedCategory = categories.find((item) => item.examId === examId && item.name.toLowerCase() === name.toLowerCase())
@@ -168,7 +187,7 @@ return }
         return
       }
       const categoryRef = doc(db, 'categories', `${user.uid}_${examId}_${id}`)
-      await setDoc(categoryRef, { name, examId, createdBy: user.uid, ...(profile?.role === 'organisation' ? { organisationId: user.uid } : {}), createdAt: serverTimestamp() })
+      await setDoc(categoryRef, { name, examId, createdBy: user.uid, ...(profile?.role === 'admin' ? {} : { organisationId: contentOrganisationId }), createdAt: serverTimestamp() })
       setCategoryIdValue(categoryRef.id)
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : 'Unable to add category.')
@@ -177,10 +196,10 @@ return }
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!user || !allowed) return
+    if (!user || !allowed || (profile?.role !== 'admin' && !contentOrganisationId)) return
     const cleaned = questions.map((item) => ({ ...item, content: cleanContent(item.content, item.format), marks: Number(item.marks) }))
     if (!title.trim() || !selectedExam || !selectedCategory || cleaned.length === 0 || cleaned.some((item) => !validContent(item.content) || item.marks < 1)) {
-      setMessage('Add a title, exam, category, every question and option, and at least one mark per question.')
+      setMessage('Select an institute, then add a title, exam, category, every question and option, and at least one mark per question.')
       return
     }
     setSaving(true)
@@ -190,8 +209,8 @@ return }
       const batch = writeBatch(db)
       const testData = {
         title: title.trim(), exam: selectedExam.name, examAlias: selectedExam.primaryAlias, examId: selectedExam.id, category: selectedCategory.name, categoryId: selectedCategory.id, published: true, publishedAt: initialTest?.publishedAt || serverTimestamp(), description: description.trim(), durationMinutes: Number(duration) || 0,
-        questionCount: cleaned.length, totalMarks: marks, visibility,
-        ...(visibility !== 'public' ? { organisationId: initialTest?.organisationId || user.uid } : testId ? { organisationId: deleteField() } : {}),
+        questionCount: cleaned.length, totalMarks: marks, visibility: contentVisibility,
+        ...(contentVisibility !== 'public' ? { organisationId: contentOrganisationId } : testId ? { organisationId: deleteField() } : {}),
         ...(testId ? { attemptLimit: deleteField() } : {}),
         ...(initialTest?.questions ? { questions: deleteField() } : {}),
         ...(testId ? {} : { createdBy: user.uid, deletedAt: null, createdAt: serverTimestamp(), schemaVersion: 2 }),
@@ -209,8 +228,8 @@ return }
         if (draft.questionId) {
           batch.update(questionRef, { ...publicContent, correctAnswer: deleteField(), revision: draft.revision + 1, updatedAt: serverTimestamp() })
         } else {
-          const questionVisibility = visibility === 'public' ? 'public' : 'private'
-          batch.set(questionRef, { ...publicContent, kind: 'mcq', createdBy: user.uid, visibility: questionVisibility, ...(questionVisibility === 'private' ? { organisationId: user.uid } : {}), revision: 1, archivedAt: null, createdAt: serverTimestamp(), updatedAt: serverTimestamp() })
+          const questionVisibility = contentVisibility === 'public' ? 'public' : 'private'
+          batch.set(questionRef, { ...publicContent, kind: 'mcq', createdBy: user.uid, visibility: questionVisibility, ...(questionVisibility === 'private' ? { organisationId: contentOrganisationId } : {}), revision: 1, archivedAt: null, createdAt: serverTimestamp(), updatedAt: serverTimestamp() })
         }
         keyWrites.push({ questionId: questionRef.id, kind: 'mcq', correctAnswer })
         const membershipRef = draft.isNew ? doc(collection(testRef, 'questions')) : doc(testRef, 'questions', draft.key)
@@ -235,16 +254,18 @@ return }
     }
   }
 
+  if (teacherOrganisationsLoading) return <p className="mt-6 text-slate-500">Checking teaching permissions…</p>
   if (!allowed) return null
   return (
     <form onSubmit={save} className="mt-8 space-y-6">
       <div className="rounded-2xl bg-white p-6 shadow-sm">
+        {isTeacher && <label className="mb-4 block text-sm font-bold">Institute<select value={contentOrganisationId} disabled={Boolean(initialTest)} onChange={event => { setOrganisationId(event.target.value); setCategoryIdValue('') }} required className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 font-normal disabled:bg-slate-100"><option value="">Select institute</option>{teacherOrganisations.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}
         <label className="block text-sm font-bold">Test title<input value={title} onChange={(event) => setTitle(event.target.value)} required className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2.5" /></label>
         <div className="mt-4"><label className="block text-sm font-bold">Exam<span className="mt-2 block font-normal"><SearchPicker value={examId} options={examOptions.map((item) => ({ id: item.id, label: item.name, detail: [...new Set([item.primaryAlias, ...item.aliases])].filter(alias => alias && alias !== item.name).join(', ') || undefined }))} onChange={(option) => { setExamId(option.id); setCategoryIdValue(''); setAddingExam(false) }} onCreate={(query) => { setNewExamName(query); setAddingExam(true) }} createLabel="Add exam" placeholder="Search exams" /></span></label>{addingExam && <div className="mt-3 rounded-xl border border-indigo-100 bg-indigo-50/50 p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><p className="text-sm font-bold text-slate-900">Add a new exam</p><p className="mt-1 text-xs text-slate-500">Existing matches will be shown before you can create it.</p></div><button type="button" onClick={() => setAddingExam(false)} className="text-sm font-bold text-indigo-700">Cancel</button></div><ExamResolver key={newExamName} initialName={newExamName} autoFocus onResolved={(exam, status) => { setExamId(exam.id); setCategoryIdValue(''); setAddingExam(false); setMessage(status === 'created' ? `Created and selected ${exam.name}.` : `Selected ${exam.name}.`) }} /></div>}</div>
         <div className="mt-4"><label className="block text-sm font-bold">Category<span className="mt-2 block font-normal"><SearchPicker value={categoryIdValue} options={categoryOptions.map((item) => ({ id: item.id, label: item.name }))} onChange={(option) => setCategoryIdValue(option.id)} onCreate={(query) => void addCategory(query)} createLabel="Create category" placeholder={examId ? 'Search or create a category' : 'Select an exam first'} disabled={!examId} /></span></label></div>
         <label className="mt-4 block text-sm font-bold">Description<textarea value={description} onChange={(event) => setDescription(event.target.value)} className="mt-2 min-h-20 w-full rounded-lg border border-slate-200 px-3 py-2.5" /></label>
         <label className="mt-4 block max-w-48 text-sm font-bold">Duration (minutes)<input value={duration} onChange={(event) => setDuration(Number(event.target.value))} type="number" min="0" className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2.5" /></label>
-        {profile?.role === 'organisation' && <fieldset className="mt-5"><legend className="text-sm font-bold">Access mode</legend><div className="mt-3 grid gap-3 sm:grid-cols-3"><AccessModeOption title="Public" description="Visible to everyone with unlimited attempts and standard timed mode." checked={visibility === 'public'} select={() => setVisibility('public')} /><AccessModeOption title="Private" description="Visible only to joined institute students, with unlimited attempts." checked={visibility === 'private'} select={() => setVisibility('private')} /><AccessModeOption title="Assigned" description="Hidden from the test library and available only through a live assignment." checked={visibility === 'assigned'} select={() => setVisibility('assigned')} /></div></fieldset>}
+        {(profile?.role === 'organisation' || isTeacher) && <fieldset className="mt-5"><legend className="text-sm font-bold">Access mode</legend><div className={`mt-3 grid gap-3 ${isTeacher ? 'sm:grid-cols-2' : 'sm:grid-cols-3'}`}>{!isTeacher && <AccessModeOption title="Public" description="Visible to everyone with unlimited attempts and standard timed mode." checked={contentVisibility === 'public'} select={() => setVisibility('public')} />}<AccessModeOption title="Private" description="Visible only to joined institute students, with unlimited attempts." checked={contentVisibility === 'private'} select={() => setVisibility('private')} /><AccessModeOption title="Assigned" description="Hidden from the test library and available only through a live assignment." checked={contentVisibility === 'assigned'} select={() => setVisibility('assigned')} /></div></fieldset>}
       </div>
       {questions.map((question, index) => <div key={question.key} className="rounded-2xl bg-white p-6 shadow-sm"><div className="flex items-center justify-between gap-3"><div><h2 className="font-bold">Question {index + 1}</h2><p className="text-xs text-slate-500">Saved to the question bank and linked to this test.</p></div><div className="flex gap-3">{index > 0 && <button type="button" onClick={() => setQuestions((current) => { const copy = [...current];
 [copy[index - 1], copy[index]] = [copy[index], copy[index - 1]];
@@ -262,16 +283,17 @@ function AccessModeOption({ title, description, checked, select }: { title: stri
 export function CreateTest() { return <section className="mx-auto max-w-3xl"><Link href="/tests" className="text-sm font-bold text-indigo-600">← Test library</Link><h1 className="mt-5 text-4xl font-black">Build a mock test</h1><TestEditor /></section> }
 
 export function EditTest({ id }: { id: string }) { const { user, profile } = useAuth();
+const { organisations: teacherOrganisations, loading: teacherOrganisationsLoading } = useTeacherOrganisations(profile?.role === 'user' ? user : null);
 const router = useRouter();
 const [test, setTest] = useState<MockTest | null>(null);
 const [message, setMessage] = useState('');
 const [deleting, setDeleting] = useState(false);
 useEffect(() => { getDoc(doc(db, 'tests', id)).then((result) => setTest(result.exists() ? ({ id: result.id, ...result.data() } as MockTest) : null)).catch((reason) => setMessage(reason.message)) }, [id]);
-const canManage = !!test && (profile?.role === 'admin' || (profile?.role === 'organisation' && test.createdBy === user?.uid));
+const canManage = !!test && (profile?.role === 'admin' || ((profile?.role === 'organisation' || (profile?.role === 'user' && teacherOrganisations.some(item => item.id === test.organisationId))) && test.createdBy === user?.uid));
 async function softDelete() { if (!test || !user || !confirm('Soft-delete this test?')) return;
 setDeleting(true);
 try { await updateDoc(doc(db, 'tests', id), { deletedAt: serverTimestamp(), deletedBy: user.uid });
-router.push('/tests') } catch (reason) { setMessage(reason instanceof Error ? reason.message : 'Unable to delete this test.') } finally { setDeleting(false) } } if (!test) return <p className="text-slate-500">Loading test…</p>;
+router.push('/tests') } catch (reason) { setMessage(reason instanceof Error ? reason.message : 'Unable to delete this test.') } finally { setDeleting(false) } } if (!test || teacherOrganisationsLoading) return <p className="text-slate-500">Loading test…</p>;
 if (!canManage) return <section><h1 className="text-3xl font-black">Access denied</h1></section>;
 if (test.origin === 'ai_generated') return <section className="mx-auto max-w-3xl"><Link href={`/tests/${id}`} className="text-sm font-bold text-indigo-600">← Back to test</Link><div className="mt-6 rounded-2xl border border-indigo-200 bg-white p-7"><h1 className="text-3xl font-black">AI-generated test</h1><p className="mt-3 text-slate-600">This published test uses private answer keys and may contain short-answer rubrics. Its approved content is immutable; soft-delete it from Manage tests or create a new AI draft to replace it.</p><Link href="/manage/tests/generate" className="mt-6 inline-block rounded-xl bg-indigo-600 px-5 py-3 font-bold text-white">Open AI generator</Link></div></section>;
 return <section className="mx-auto max-w-3xl"><Link href={`/tests/${id}`} className="text-sm font-bold text-indigo-600">← Back to test</Link><div className="mt-5 flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:justify-between"><h1 className="text-4xl font-black">Edit mock test</h1><button disabled={deleting} onClick={softDelete} className="rounded-lg border border-rose-200 px-3 py-2 text-sm font-bold text-rose-700">Soft delete</button></div>{message && <p className="mt-4 text-rose-700">{message}</p>}<TestEditor testId={id} initialTest={test} /></section> }
