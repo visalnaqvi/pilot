@@ -1,4 +1,5 @@
 import { and, desc, eq, inArray } from 'drizzle-orm'
+import { after } from 'next/server'
 import { z } from 'zod'
 import {
   assignmentBatches,
@@ -19,7 +20,19 @@ import {
 } from '@/db/schema'
 import { authenticateRequest, errorResponse } from '@/lib/admin-api'
 import { database } from '@/lib/db'
+import { isEmailConfigured } from '@/lib/email'
+import { processEmailJob } from '@/lib/email-worker'
 import { canManageOrganization } from '@/lib/services/access'
+import { planTaskEmailJobs, taskEmailJobKind } from '@/lib/task-email-plan'
+
+export const runtime = 'nodejs'
+export const maxDuration = 60
+
+function queueImmediateDelivery(jobId?: string) {
+  if (!jobId || !isEmailConfigured()) return
+  after(() => processEmailJob(jobId)
+    .catch(error => console.error('Immediate task email processing failed.', error)))
+}
 
 const createSchema = z.object({
   organizationId: z.string().uuid(),
@@ -165,7 +178,8 @@ export async function POST(request: Request) {
     if (!(await canManageOrganization(auth.user, parsed.data.organizationId))) {
       return Response.json({ error: 'Organization manager access required.' }, { status: 403 })
     }
-    const id = await database().transaction(async tx => {
+    const result = await database().transaction(async tx => {
+      const createdAt = new Date()
       const groupMembers = parsed.data.groupIds.length
         ? await tx.select().from(organizationGroupMembers).where(inArray(organizationGroupMembers.groupId, parsed.data.groupIds))
         : []
@@ -179,6 +193,8 @@ export async function POST(request: Request) {
         type: parsed.data.type,
         startAt: parsed.data.startAt ? new Date(parsed.data.startAt) : null,
         endAt: parsed.data.endAt ? new Date(parsed.data.endAt) : null,
+        createdAt,
+        updatedAt: createdAt,
       }).returning()
       await tx.insert(taskAssignees).values(recipientIds.map(userId => ({ taskId: task.id, userId })))
       if (parsed.data.groupIds.length) await tx.insert(taskGroups).values(parsed.data.groupIds.map(groupId => ({ taskId: task.id, groupId })))
@@ -191,15 +207,22 @@ export async function POST(request: Request) {
         await tx.update(files).set({ status: 'attached', attachedAt: new Date() }).where(inArray(files.id, parsed.data.fileIds))
       }
       await tx.insert(taskActivity).values({ taskId: task.id, actorUserId: auth.user.uid, type: 'created', data: { recipientCount: recipientIds.length } })
-      await tx.insert(emailJobs).values({
-        kind: 'task_assigned',
+      const plannedJobs = planTaskEmailJobs({
+        taskId: task.id,
+        createdAt,
+        startAt: task.startAt,
+        endAt: task.endAt,
+      })
+      const queuedJobs = await tx.insert(emailJobs).values(plannedJobs.map(job => ({
+        kind: taskEmailJobKind('task', job.eventType),
         organizationId: parsed.data.organizationId,
         entityType: 'task',
         entityId: task.id,
-        payload: { recipientIds },
-        scheduledFor: new Date(),
-        dedupeKey: `task:${task.id}:assigned`,
-      })
+        payload: { recipientIds, eventType: job.eventType },
+        scheduledFor: job.dueAt,
+        nextAttemptAt: job.dueAt,
+        dedupeKey: `task:${task.id}:${job.eventType}`,
+      }))).returning({ id: emailJobs.id, kind: emailJobs.kind })
       await tx.insert(notifications).values(recipientIds.map(userId => ({
         type: 'task_assigned',
         recipientUserId: userId,
@@ -211,9 +234,13 @@ export async function POST(request: Request) {
         dedupeKey: `task:${task.id}:user:${userId}`,
         visibleAt: new Date(),
       })))
-      return task.id
+      return {
+        id: task.id,
+        immediateEmailJobId: queuedJobs.find(job => job.kind === 'task_assigned')?.id,
+      }
     })
-    return Response.json({ id }, { status: 201 })
+    queueImmediateDelivery(result.immediateEmailJobId)
+    return Response.json({ id: result.id }, { status: 201 })
   } catch (error) {
     return errorResponse(error, 'Unable to create task.')
   }

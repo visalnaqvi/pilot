@@ -53,6 +53,12 @@ Configure the SendGrid, app URL, time-zone, and cron variables from `.env.exampl
 npm run email:poll
 ```
 
+New task and assignment notices are processed immediately after their creation
+response. The poller handles start/deadline reminders, retries, and consolidated
+timetable agendas. A timetable agenda is queued once per organization and class
+date for 7:00 AM in the timetable time zone; a poll after 7:00 AM sends that due
+agenda once. Publishing a timetable does not send an email announcement.
+
 ## Development
 
 ```bash

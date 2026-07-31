@@ -1,4 +1,5 @@
 import { and, desc, eq, inArray } from 'drizzle-orm'
+import { after } from 'next/server'
 import { z } from 'zod'
 import {
   assignmentBatches,
@@ -18,7 +19,19 @@ import {
 } from '@/db/schema'
 import { authenticateRequest, errorResponse } from '@/lib/admin-api'
 import { database } from '@/lib/db'
+import { isEmailConfigured } from '@/lib/email'
+import { processEmailJob } from '@/lib/email-worker'
 import { canManageOrganization } from '@/lib/services/access'
+import { planTaskEmailJobs, taskEmailJobKind } from '@/lib/task-email-plan'
+
+export const runtime = 'nodejs'
+export const maxDuration = 60
+
+function queueImmediateDelivery(jobId?: string) {
+  if (!jobId || !isEmailConfigured()) return
+  after(() => processEmailJob(jobId)
+    .catch(error => console.error('Immediate assignment email processing failed.', error)))
+}
 
 const createSchema = z.object({
   organizationId: z.string().uuid(),
@@ -132,6 +145,7 @@ export async function POST(request: Request) {
     if (deadline <= startAt) return Response.json({ error: 'Deadline must be after the start.' }, { status: 400 })
     const db = database()
     const result = await db.transaction(async tx => {
+      const createdAt = new Date()
       const test = (await tx.select().from(tests).where(eq(tests.id, parsed.data.testId)).limit(1))[0]
       if (!test || test.organizationId !== parsed.data.organizationId || test.visibility !== 'assigned') {
         throw new Error('Select an assigned-mode test from this organization.')
@@ -168,6 +182,7 @@ export async function POST(request: Request) {
         startAt,
         deadline,
         maxAttempts: parsed.data.maxAttempts,
+        createdAt,
       }).returning()
       await tx.insert(assignmentRecipients).values(recipientIds.map(userId => ({ assignmentBatchId: batch.id, userId })))
       const [task] = await tx.insert(tasks).values({
@@ -179,19 +194,28 @@ export async function POST(request: Request) {
         type: 'basic',
         startAt,
         endAt: deadline,
+        createdAt,
+        updatedAt: createdAt,
       }).returning()
       await tx.insert(taskAssignees).values(recipientIds.map(userId => ({ taskId: task.id, userId })))
       if (groupId) await tx.insert(taskGroups).values({ taskId: task.id, groupId })
       await tx.insert(taskActivity).values({ taskId: task.id, actorUserId: auth.user.uid, type: 'created', data: { assignmentBatchId: batch.id } })
-      await tx.insert(emailJobs).values({
-        kind: 'assignment_assigned',
+      const plannedJobs = planTaskEmailJobs({
+        taskId: task.id,
+        createdAt,
+        startAt,
+        endAt: deadline,
+      })
+      const queuedJobs = await tx.insert(emailJobs).values(plannedJobs.map(job => ({
+        kind: taskEmailJobKind('assignment', job.eventType),
         organizationId: parsed.data.organizationId,
         entityType: 'assignment',
         entityId: batch.id,
-        payload: { recipientIds },
-        scheduledFor: new Date(),
-        dedupeKey: `assignment:${batch.id}:assigned`,
-      })
+        payload: { recipientIds, eventType: job.eventType, taskId: task.id },
+        scheduledFor: job.dueAt,
+        nextAttemptAt: job.dueAt,
+        dedupeKey: `assignment:${batch.id}:${job.eventType}`,
+      }))).returning({ id: emailJobs.id, kind: emailJobs.kind })
       await tx.insert(notifications).values(recipientIds.map(userId => ({
         type: 'assignment_assigned',
         recipientUserId: userId,
@@ -203,9 +227,13 @@ export async function POST(request: Request) {
         dedupeKey: `assignment:${batch.id}:user:${userId}`,
         visibleAt: new Date(),
       })))
-      return batch.id
+      return {
+        id: batch.id,
+        immediateEmailJobId: queuedJobs.find(job => job.kind === 'assignment_assigned')?.id,
+      }
     })
-    return Response.json({ id: result }, { status: 201 })
+    queueImmediateDelivery(result.immediateEmailJobId)
+    return Response.json({ id: result.id }, { status: 201 })
   } catch (error) {
     return errorResponse(error, 'Unable to create assignment.')
   }

@@ -1,136 +1,377 @@
 import 'server-only'
 
-import { eq, inArray, sql } from 'drizzle-orm'
+import { and, eq, inArray, sql } from 'drizzle-orm'
 import {
   assignmentBatches,
+  assignmentRecipients,
   emailDeliveries,
   emailJobs,
   organizationGroupMembers,
   organizations,
+  taskAssignees,
   tasks,
+  taskSubmissions,
+  testSubmissions,
+  timetableEntries,
+  timetableEntryDays,
+  timetables,
   timetableVersionGroups,
+  timetableVersions,
   timetableVersionUsers,
   users,
 } from '@/db/schema'
+import { appBaseUrl } from '@/lib/app-url'
 import { database } from '@/lib/db'
 import { sendEmail } from '@/lib/email'
-import { appBaseUrl } from '@/lib/app-url'
+import { buildTaskEmail, isEmailAddress } from '@/lib/task-email-content'
+import { retryAtForAttempt, taskEmailSkipReason, type TaskEmailEventType } from '@/lib/task-email-plan'
+import { buildTimetableAgendaEmail } from '@/lib/timetable-email-content'
+import { entriesForDate, type TimetableEntry } from '@/lib/timetable'
 
 type ClaimedJob = typeof emailJobs.$inferSelect
+type Recipient = typeof users.$inferSelect
+type JobPayload = {
+  recipientIds?: string[]
+  eventType?: TaskEmailEventType
+  taskId?: string
+  localDate?: string
+}
+type PreparedDelivery = {
+  recipient: Recipient
+  content: { subject: string; text: string; html?: string }
+  metadata: Record<string, string>
+}
 
-async function claimJobs(limit: number) {
+const leaseMilliseconds = 5 * 60_000
+const maxAttempts = 5
+
+async function claimJobs(limit: number, now: Date) {
   return database().transaction(async tx => {
     const result = await tx.execute(sql<{ id: string }>`
       select id
       from email_jobs
       where (
-        (status = 'pending' and next_attempt_at <= now())
-        or (status = 'processing' and lease_until < now())
+        (status = 'pending' and next_attempt_at <= ${now})
+        or (status = 'processing' and lease_until < ${now})
       )
       order by next_attempt_at
       for update skip locked
       limit ${limit}
     `)
     const ids = (result.rows as unknown as { id: string }[]).map(row => row.id)
-    if (ids.length) {
-      return tx.update(emailJobs).set({
-        status: 'processing',
-        leaseUntil: new Date(Date.now() + 5 * 60_000),
-        updatedAt: new Date(),
-      }).where(inArray(emailJobs.id, ids)).returning()
-    }
-    return [] as ClaimedJob[]
+    if (!ids.length) return [] as ClaimedJob[]
+    return tx.update(emailJobs).set({
+      status: 'processing',
+      leaseUntil: new Date(now.getTime() + leaseMilliseconds),
+      updatedAt: now,
+    }).where(inArray(emailJobs.id, ids)).returning()
   })
 }
 
-async function recipients(job: ClaimedJob) {
-  const payload = (job.payload || {}) as { recipientIds?: string[]; versionId?: string }
-  const ids = new Set(payload.recipientIds || [])
-  if (job.kind === 'timetable_published' && payload.versionId) {
-    const direct = await database().select().from(timetableVersionUsers).where(eq(timetableVersionUsers.versionId, payload.versionId))
-    direct.forEach(item => ids.add(item.userId))
-    const groups = await database().select().from(timetableVersionGroups).where(eq(timetableVersionGroups.versionId, payload.versionId))
-    if (groups.length) {
-      const members = await database().select().from(organizationGroupMembers).where(inArray(organizationGroupMembers.groupId, groups.map(item => item.groupId)))
-      members.forEach(item => ids.add(item.userId))
-    }
-  }
-  return ids.size ? database().select().from(users).where(inArray(users.id, [...ids])) : []
+async function claimJob(jobId: string, now: Date) {
+  const jobs = await database().transaction(async tx => {
+    const result = await tx.execute(sql<{ id: string }>`
+      select id
+      from email_jobs
+      where id = ${jobId}
+        and (
+          (status = 'pending' and next_attempt_at <= ${now})
+          or (status = 'processing' and lease_until < ${now})
+        )
+      for update skip locked
+      limit 1
+    `)
+    if (!result.rows.length) return [] as ClaimedJob[]
+    return tx.update(emailJobs).set({
+      status: 'processing',
+      leaseUntil: new Date(now.getTime() + leaseMilliseconds),
+      updatedAt: now,
+    }).where(eq(emailJobs.id, jobId)).returning()
+  })
+  return jobs[0] || null
 }
 
-async function content(job: ClaimedJob) {
-  const organization = job.organizationId
-    ? (await database().select().from(organizations).where(eq(organizations.id, job.organizationId)).limit(1))[0]
+function eventTypeForJob(job: ClaimedJob) {
+  const payload = (job.payload || {}) as JobPayload
+  if (payload.eventType) return payload.eventType
+  if (job.kind.endsWith('_deadline_24h')) return 'deadline-24h'
+  if (job.kind.endsWith('_deadline_1h')) return 'deadline-1h'
+  if (job.kind.endsWith('_start')) return 'start'
+  if (job.kind.endsWith('_ended')) return 'ended'
+  return 'assigned'
+}
+
+async function taskDeliveries(job: ClaimedJob): Promise<PreparedDelivery[]> {
+  const payload = (job.payload || {}) as JobPayload
+  const assignment = job.entityType === 'assignment'
+    ? (await database().select().from(assignmentBatches).where(eq(assignmentBatches.id, job.entityId)).limit(1))[0]
     : null
-  if (job.entityType === 'task') {
-    const item = (await database().select().from(tasks).where(eq(tasks.id, job.entityId)).limit(1))[0]
-    return { subject: `New task: ${item?.title || 'Task'}`, detail: item?.description || '', href: '/tasks' }
-  }
-  if (job.entityType === 'assignment') {
-    const item = (await database().select().from(assignmentBatches).where(eq(assignmentBatches.id, job.entityId)).limit(1))[0]
-    return { subject: `New assignment: ${item?.name || 'Assignment'}`, detail: `Available until ${item?.deadline.toLocaleString() || 'the deadline'}.`, href: '/assignments' }
-  }
-  return { subject: `Timetable published by ${organization?.name || 'your organization'}`, detail: 'A new timetable version is available.', href: '/timetables' }
+  const task = assignment
+    ? (await database().select().from(tasks).where(eq(tasks.assignmentBatchId, assignment.id)).limit(1))[0]
+    : (await database().select().from(tasks).where(eq(tasks.id, payload.taskId || job.entityId)).limit(1))[0]
+  if (!task) return []
+
+  const organization = (await database().select().from(organizations)
+    .where(eq(organizations.id, task.organizationId)).limit(1))[0]
+  const assignedRows = await database().select().from(taskAssignees).where(eq(taskAssignees.taskId, task.id))
+  const statusByUser = new Map(assignedRows.map(row => [row.userId, row.status]))
+  const recipientIds = [...new Set(payload.recipientIds?.length
+    ? payload.recipientIds
+    : assignment
+      ? (await database().select().from(assignmentRecipients)
+          .where(eq(assignmentRecipients.assignmentBatchId, assignment.id))).map(row => row.userId)
+      : assignedRows.map(row => row.userId))]
+  if (!recipientIds.length) return []
+
+  const submittedUserIds = new Set(assignment
+    ? (await database().select({ userId: testSubmissions.userId }).from(testSubmissions)
+        .where(eq(testSubmissions.assignmentBatchId, assignment.id))).map(row => row.userId)
+    : (await database().select({ userId: taskSubmissions.userId }).from(taskSubmissions)
+        .where(eq(taskSubmissions.taskId, task.id))).map(row => row.userId))
+  const eventType = eventTypeForJob(job)
+  const people = await database().select().from(users).where(inArray(users.id, recipientIds))
+  const actionPath = assignment
+    ? `/tests/${encodeURIComponent(assignment.testId)}?assignment=${encodeURIComponent(assignment.id)}`
+    : '/tasks'
+
+  return people.flatMap(recipient => {
+    const skipReason = taskEmailSkipReason({
+      eventType,
+      manuallyClosed: task.isClosed,
+      assigneeStatus: statusByUser.get(recipient.id),
+      submitted: submittedUserIds.has(recipient.id),
+    })
+    if (skipReason) return []
+    return [{
+      recipient,
+      content: buildTaskEmail({
+        eventType,
+        recipientName: recipient.name,
+        taskTitle: assignment?.name || task.title,
+        organisationName: organization?.name || 'Institute',
+        description: task.description,
+        startAt: assignment?.startAt || task.startAt,
+        endAt: assignment?.deadline || task.endAt,
+        actionUrl: `${appBaseUrl()}${actionPath}`,
+        timeZone: process.env.APP_TIME_ZONE || 'Asia/Kolkata',
+      }),
+      metadata: {
+        job_id: job.id,
+        user_id: recipient.id,
+        event_type: eventType,
+      },
+    }]
+  })
 }
 
-async function processJob(job: ClaimedJob) {
-  const people = await recipients(job)
-  const copy = await content(job)
-  for (const person of people) {
-    try {
-      const result = await sendEmail({
-        to: person.email,
-        subject: copy.subject,
-        text: `Hi ${person.name},\n\n${copy.detail}\n\nOpen MockPilot: ${appBaseUrl()}${copy.href}`,
-        metadata: { jobId: job.id, kind: job.kind },
-      })
-      await database().insert(emailDeliveries).values({
-        jobId: job.id,
-        recipientUserId: person.id,
-        recipientEmail: person.email,
-        status: 'sent',
-        providerMessageId: result.providerMessageId,
-      }).onConflictDoUpdate({
-        target: [emailDeliveries.jobId, emailDeliveries.recipientEmail],
-        set: { status: 'sent', providerMessageId: result.providerMessageId, error: null, attemptedAt: new Date() },
-      })
-    } catch (error) {
-      await database().insert(emailDeliveries).values({
-        jobId: job.id,
-        recipientUserId: person.id,
-        recipientEmail: person.email,
-        status: 'failed',
-        error: error instanceof Error ? error.message : 'Delivery failed.',
-      }).onConflictDoUpdate({
-        target: [emailDeliveries.jobId, emailDeliveries.recipientEmail],
-        set: { status: 'failed', error: error instanceof Error ? error.message : 'Delivery failed.', attemptedAt: new Date() },
-      })
-      throw error
+async function timetableAgendaDeliveries(job: ClaimedJob): Promise<PreparedDelivery[]> {
+  const payload = (job.payload || {}) as JobPayload
+  if (!job.organizationId || !payload.localDate) return []
+  const localDate = payload.localDate
+  const organization = (await database().select().from(organizations)
+    .where(eq(organizations.id, job.organizationId)).limit(1))[0]
+  const timetableRows = await database().select().from(timetables).where(and(
+    eq(timetables.organizationId, job.organizationId),
+    eq(timetables.status, 'active'),
+  ))
+  const versionIds = timetableRows.flatMap(item => item.currentPublishedVersionId ? [item.currentPublishedVersionId] : [])
+  if (!versionIds.length) return []
+  const versionRows = (await database().select().from(timetableVersions)
+    .where(inArray(timetableVersions.id, versionIds)))
+    .filter(version => version.effectiveFrom <= localDate && version.effectiveTo >= localDate)
+  if (!versionRows.length) return []
+
+  const activeVersionIds = versionRows.map(version => version.id)
+  const entryRows = await database().select().from(timetableEntries)
+    .where(inArray(timetableEntries.versionId, activeVersionIds))
+  const entryIds = entryRows.map(entry => entry.id)
+  const dayRows = entryIds.length
+    ? await database().select().from(timetableEntryDays).where(inArray(timetableEntryDays.entryId, entryIds))
+    : []
+  const directRows = await database().select().from(timetableVersionUsers)
+    .where(inArray(timetableVersionUsers.versionId, activeVersionIds))
+  const versionGroupRows = await database().select().from(timetableVersionGroups)
+    .where(inArray(timetableVersionGroups.versionId, activeVersionIds))
+  const groupIds = [...new Set(versionGroupRows.map(row => row.groupId))]
+  const groupMemberRows = groupIds.length
+    ? await database().select().from(organizationGroupMembers)
+        .where(inArray(organizationGroupMembers.groupId, groupIds))
+    : []
+  const timetableByVersion = new Map(timetableRows.flatMap(item => (
+    item.currentPublishedVersionId ? [[item.currentPublishedVersionId, item] as const] : []
+  )))
+  const entriesByUser = new Map<string, Array<TimetableEntry & { timetableName: string }>>()
+
+  for (const version of versionRows) {
+    const timetable = timetableByVersion.get(version.id)
+    if (!timetable) continue
+    const entries: TimetableEntry[] = entryRows
+      .filter(entry => entry.versionId === version.id)
+      .map(entry => ({
+        id: entry.id,
+        subject: entry.subject,
+        weekdays: dayRows.filter(day => day.entryId === entry.id).map(day => day.weekday),
+        startTime: entry.startTime,
+        endTime: entry.endTime,
+        teacher: entry.teacherLabel || undefined,
+        location: entry.location || undefined,
+        meetingUrl: entry.meetingUrl || undefined,
+        notes: entry.notes || undefined,
+      }))
+    const todayEntries = entriesForDate(entries, localDate)
+    if (!todayEntries.length) continue
+    const directUserIds = directRows.filter(row => row.versionId === version.id).map(row => row.userId)
+    const ownGroupIds = versionGroupRows.filter(row => row.versionId === version.id).map(row => row.groupId)
+    const groupUserIds = groupMemberRows.filter(row => ownGroupIds.includes(row.groupId)).map(row => row.userId)
+    for (const userId of new Set([...directUserIds, ...groupUserIds])) {
+      const agenda = entriesByUser.get(userId) || []
+      agenda.push(...todayEntries.map(entry => ({ ...entry, timetableName: timetable.name })))
+      entriesByUser.set(userId, agenda)
     }
   }
-  await database().update(emailJobs).set({ status: 'sent', leaseUntil: null, attempts: job.attempts + 1, updatedAt: new Date() }).where(eq(emailJobs.id, job.id))
+
+  const recipientIds = [...entriesByUser.keys()]
+  if (!recipientIds.length) return []
+  const people = await database().select().from(users).where(inArray(users.id, recipientIds))
+  return people.map(recipient => ({
+    recipient,
+    content: buildTimetableAgendaEmail({
+      recipientName: recipient.name,
+      organisationName: organization?.name || 'Institute',
+      localDate,
+      entries: entriesByUser.get(recipient.id) || [],
+      actionUrl: `${appBaseUrl()}/timetables`,
+    }),
+    metadata: {
+      job_id: job.id,
+      user_id: recipient.id,
+      local_date: localDate,
+    },
+  }))
 }
 
-export async function processDueEmailJobs(limit = 20) {
-  const jobs = await claimJobs(limit)
+async function existingDelivery(jobId: string, recipientEmail: string) {
+  return (await database().select().from(emailDeliveries).where(and(
+    eq(emailDeliveries.jobId, jobId),
+    eq(emailDeliveries.recipientEmail, recipientEmail),
+  )).limit(1))[0]
+}
+
+async function deliver(job: ClaimedJob, delivery: PreparedDelivery) {
+  const { recipient, content, metadata } = delivery
+  const existing = await existingDelivery(job.id, recipient.email)
+  if (existing?.status === 'sent' || existing?.status === 'skipped') return true
+  if (!isEmailAddress(recipient.email)) {
+    await database().insert(emailDeliveries).values({
+      jobId: job.id,
+      recipientUserId: recipient.id,
+      recipientEmail: recipient.email,
+      status: 'skipped',
+      error: 'Missing or invalid email address.',
+    }).onConflictDoUpdate({
+      target: [emailDeliveries.jobId, emailDeliveries.recipientEmail],
+      set: { status: 'skipped', error: 'Missing or invalid email address.', attemptedAt: new Date() },
+    })
+    return true
+  }
+  try {
+    const result = await sendEmail({ to: recipient.email, ...content, metadata })
+    await database().insert(emailDeliveries).values({
+      jobId: job.id,
+      recipientUserId: recipient.id,
+      recipientEmail: recipient.email,
+      status: 'sent',
+      providerMessageId: result.providerMessageId,
+    }).onConflictDoUpdate({
+      target: [emailDeliveries.jobId, emailDeliveries.recipientEmail],
+      set: { status: 'sent', providerMessageId: result.providerMessageId, error: null, attemptedAt: new Date() },
+    })
+    return true
+  } catch (error) {
+    const message = (error instanceof Error ? error.message : 'Delivery failed.')
+      .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]').slice(0, 500)
+    await database().insert(emailDeliveries).values({
+      jobId: job.id,
+      recipientUserId: recipient.id,
+      recipientEmail: recipient.email,
+      status: 'failed',
+      error: message,
+    }).onConflictDoUpdate({
+      target: [emailDeliveries.jobId, emailDeliveries.recipientEmail],
+      set: { status: 'failed', error: message, attemptedAt: new Date() },
+    })
+    return false
+  }
+}
+
+async function mapWithConcurrency<T, R>(items: T[], limit: number, mapper: (item: T) => Promise<R>) {
+  const results = new Array<R>(items.length)
+  let cursor = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor
+      cursor += 1
+      results[index] = await mapper(items[index])
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
+
+async function processClaimedJob(job: ClaimedJob, now: Date) {
+  if (job.kind === 'timetable_published') {
+    await database().update(emailJobs).set({
+      status: 'cancelled',
+      leaseUntil: null,
+      lastError: 'Superseded by the once-daily 7:00 AM timetable agenda.',
+      updatedAt: now,
+    }).where(eq(emailJobs.id, job.id))
+    return 'cancelled' as const
+  }
+
+  const deliveries = job.kind === 'timetable_agenda'
+    ? await timetableAgendaDeliveries(job)
+    : await taskDeliveries(job)
+  const results = await mapWithConcurrency(deliveries, 8, delivery => deliver(job, delivery))
+  const failedDeliveries = results.filter(result => !result).length
+  const attempts = job.attempts + 1
+  if (failedDeliveries) {
+    await database().update(emailJobs).set({
+      status: attempts >= maxAttempts ? 'failed' : 'pending',
+      attempts,
+      leaseUntil: null,
+      nextAttemptAt: retryAtForAttempt(attempts, now),
+      lastError: `${failedDeliveries} email delivery attempt${failedDeliveries === 1 ? '' : 's'} failed.`,
+      updatedAt: now,
+    }).where(eq(emailJobs.id, job.id))
+    return 'failed' as const
+  }
+  await database().update(emailJobs).set({
+    status: 'sent',
+    attempts,
+    leaseUntil: null,
+    lastError: null,
+    updatedAt: now,
+  }).where(eq(emailJobs.id, job.id))
+  return 'sent' as const
+}
+
+export async function processEmailJob(jobId: string, now = new Date()) {
+  const job = await claimJob(jobId, now)
+  if (!job) return { processed: false, status: null }
+  return { processed: true, status: await processClaimedJob(job, now) }
+}
+
+export async function processDueEmailJobs(limit = 20, now = new Date()) {
+  const jobs = await claimJobs(limit, now)
   let sent = 0
   let failed = 0
+  let cancelled = 0
   for (const job of jobs) {
-    try {
-      await processJob(job)
-      sent += 1
-    } catch (error) {
-      const attempts = job.attempts + 1
-      await database().update(emailJobs).set({
-        status: attempts >= 5 ? 'failed' : 'pending',
-        attempts,
-        leaseUntil: null,
-        nextAttemptAt: new Date(Date.now() + Math.min(60, 2 ** attempts) * 60_000),
-        lastError: error instanceof Error ? error.message : 'Delivery failed.',
-        updatedAt: new Date(),
-      }).where(eq(emailJobs.id, job.id))
-      failed += 1
-    }
+    const status = await processClaimedJob(job, now)
+    if (status === 'sent') sent += 1
+    else if (status === 'failed') failed += 1
+    else cancelled += 1
   }
-  return { claimed: jobs.length, sent, failed }
+  return { claimed: jobs.length, sent, failed, cancelled }
 }

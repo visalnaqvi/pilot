@@ -113,6 +113,20 @@ test('Asia/Kolkata morning jobs are planned for 7 AM local time and remain idemp
   assert.equal(timetableAgendaJobId('org-1', '2026-01-05'), 'agenda:org-1:2026-01-05')
 })
 
+test('a timetable published after 7 AM does not queue a late agenda for that day', () => {
+  const jobs = planTimetableAgendaJobs({
+    organisationId: 'org-1',
+    effectiveFrom: '2026-01-05',
+    effectiveTo: '2026-01-12',
+    entries: [monday],
+    timeZone: 'Asia/Kolkata',
+    now: new Date('2026-01-05T01:31:00.000Z'),
+  })
+  assert.deepEqual(jobs.map(job => [job.id, job.dueAt.toISOString()]), [
+    ['agenda:org-1:2026-01-12', '2026-01-12T01:30:00.000Z'],
+  ])
+})
+
 test('morning timetable emails aggregate agenda rows and escape user-controlled HTML', () => {
   const agenda = buildTimetableAgendaEmail({
     recipientName: '<Student>',

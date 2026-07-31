@@ -4,6 +4,7 @@ import { buildTaskEmail, escapeHtml, isEmailAddress } from '../lib/task-email-co
 import {
   planTaskEmailJobs,
   retryAtForAttempt,
+  taskEmailJobKind,
   taskEmailSkipReason,
 } from '../lib/task-email-plan'
 
@@ -43,6 +44,12 @@ test('task email planner handles undated tasks and retry backoff', () => {
   assert.equal(retryAtForAttempt(3, now).toISOString(), '2026-01-01T00:15:00.000Z')
   assert.equal(retryAtForAttempt(4, now).toISOString(), '2026-01-01T01:00:00.000Z')
   assert.equal(retryAtForAttempt(5, now).toISOString(), '2026-01-01T01:00:00.000Z')
+})
+
+test('task and assignment jobs use stable Postgres worker kinds', () => {
+  assert.equal(taskEmailJobKind('task', 'assigned'), 'task_assigned')
+  assert.equal(taskEmailJobKind('task', 'deadline-24h'), 'task_deadline_24h')
+  assert.equal(taskEmailJobKind('assignment', 'deadline-1h'), 'assignment_deadline_1h')
 })
 
 test('delivery policy skips manual closures and completed reminders', () => {

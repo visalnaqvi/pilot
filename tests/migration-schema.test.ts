@@ -53,3 +53,23 @@ test('email worker claims jobs with row locking and skip locked', () => {
   const worker = readFileSync(join(process.cwd(), 'lib', 'email-worker.ts'), 'utf8')
   assert.match(worker, /for update skip locked/i)
 })
+
+test('creation routes send only assigned jobs immediately and leave scheduled jobs for the poller', () => {
+  const taskRoute = readFileSync(join(process.cwd(), 'app', 'api', 'tasks', 'route.ts'), 'utf8')
+  const assignmentRoute = readFileSync(join(process.cwd(), 'app', 'api', 'assignments', 'route.ts'), 'utf8')
+  for (const route of [taskRoute, assignmentRoute]) {
+    assert.match(route, /after\(\(\) => processEmailJob\(jobId\)/)
+    assert.match(route, /planTaskEmailJobs/)
+    assert.match(route, /immediateEmailJobId/)
+  }
+})
+
+test('timetable publishing queues deduplicated 7 AM agendas instead of publication emails', () => {
+  const publishRoute = readFileSync(join(
+    process.cwd(), 'app', 'api', 'timetables', '[id]', 'publish', 'route.ts',
+  ), 'utf8')
+  assert.match(publishRoute, /planTimetableAgendaJobs/)
+  assert.match(publishRoute, /kind: 'timetable_agenda'/)
+  assert.match(publishRoute, /onConflictDoNothing/)
+  assert.doesNotMatch(publishRoute, /kind: 'timetable_published'/)
+})

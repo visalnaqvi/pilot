@@ -25,6 +25,10 @@ export function taskEmailDeliveryId(jobId: string, userId: string) {
   return `${jobId}:${userId}`
 }
 
+export function taskEmailJobKind(source: 'task' | 'assignment', eventType: TaskEmailEventType) {
+  return `${source}_${eventType.replace('-', '_')}`
+}
+
 export function planTaskEmailJobs(input: {
   taskId: string
   createdAt: Date
