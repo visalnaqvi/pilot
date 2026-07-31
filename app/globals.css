@@ -13,6 +13,7 @@
 body {
   background: var(--background);
   color: var(--foreground);
+  font-family: "Montserrat", sans-serif;
   min-width: 0;
   overflow-x: clip;
 }

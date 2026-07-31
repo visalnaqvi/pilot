@@ -1,432 +1,212 @@
-import { after } from 'next/server'
+import { and, desc, eq, inArray } from 'drizzle-orm'
 import { z } from 'zod'
-import { errorResponse, requireRole } from '@/lib/admin-api'
-import { isEmailConfigured } from '@/lib/email'
-import { adminDb, Timestamp } from '@/lib/firebase-admin'
-import { resolveAssignmentAudience } from '@/lib/task-api'
-import { ensureTaskEmailJobs } from '@/lib/task-email-jobs'
-import { taskEmailJobId } from '@/lib/task-email-plan'
-import { processTaskEmailJob } from '@/lib/task-email-worker'
-import { assignmentInstanceId } from '@/lib/assignment-instance'
-import { contentOrganisationFor } from '@/lib/teacher-access'
-import { assignmentMatchesOrganisation } from '@/lib/assignment-scope'
-import { memberRole } from '@/lib/membership'
+import {
+  assignmentBatches,
+  assignmentRecipients,
+  emailJobs,
+  notifications,
+  organizationGroupMembers,
+  organizationGroups,
+  organizationMemberships,
+  taskActivity,
+  taskAssignees,
+  taskGroups,
+  tasks,
+  testSubmissions,
+  tests,
+  users,
+} from '@/db/schema'
+import { authenticateRequest, errorResponse } from '@/lib/admin-api'
+import { database } from '@/lib/db'
+import { canManageOrganization } from '@/lib/services/access'
 
-export const runtime = 'nodejs'
-export const maxDuration = 60
-
-const identifier = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/)
-const createAssignmentSchema = z.object({
-  taskId: identifier,
-  assignmentBatchId: identifier,
-  organisationId: identifier.optional(),
-  name: z.string().trim().min(1).max(200),
-  testId: identifier,
+const createSchema = z.object({
+  organizationId: z.string().uuid(),
+  name: z.string().trim().min(1).max(240),
+  testId: z.string().uuid(),
   targetType: z.enum(['group', 'user']),
-  targetId: identifier,
+  targetId: z.string().min(1),
   startAt: z.string().datetime(),
   deadline: z.string().datetime(),
   maxAttempts: z.number().int().min(1).max(100),
 })
 
-function queueImmediateDelivery(taskId: string) {
-  if (!isEmailConfigured()) return
-  after(() => processTaskEmailJob(taskEmailJobId(taskId, 'assigned'))
-    .catch(error => console.error('Immediate assignment email processing failed.', error)))
-}
-
-function timestampJson(value: unknown) {
-  if (value && typeof value === 'object' && 'toDate' in value
-    && typeof value.toDate === 'function') {
-    return value.toDate().toISOString()
-  }
-  return value ?? null
-}
-
-function assignmentJson(document: FirebaseFirestore.QueryDocumentSnapshot) {
-  const data = document.data()
-  return {
-    id: document.id,
-    ...data,
-    startAt: timestampJson(data.startAt),
-    deadline: timestampJson(data.deadline),
-    endAt: timestampJson(data.endAt),
-    createdAt: timestampJson(data.createdAt),
-  }
-}
-
-function testJson(document: FirebaseFirestore.QueryDocumentSnapshot) {
-  const data = document.data()
-  return {
-    id: document.id,
-    ...data,
-    createdAt: timestampJson(data.createdAt),
-    publishedAt: timestampJson(data.publishedAt),
-    deletedAt: timestampJson(data.deletedAt),
-  }
-}
-
-function submissionJson(document: FirebaseFirestore.QueryDocumentSnapshot) {
-  const data = document.data()
-  return {
-    id: document.id,
-    ...data,
-    submittedAt: timestampJson(data.submittedAt),
-  }
-}
-
-function uniqueDocuments(snapshots: FirebaseFirestore.QuerySnapshot[]) {
-  return [...new Map(snapshots
-    .flatMap(snapshot => snapshot.docs)
-    .map(document => [document.id, document])).values()]
-}
-
-async function organisationAssignments(organisationId: string) {
-  const collection = adminDb.collection('assignmentBatches')
-  const snapshots = await Promise.all([
-    collection.where('organisationId', '==', organisationId).get(),
-    collection.where('assignedBy', '==', organisationId).get(),
-  ])
-  return uniqueDocuments(snapshots)
-    .filter(document => assignmentMatchesOrganisation(document.data(), organisationId))
-}
-
-async function assignmentSubmissions(assignmentIds: string[]) {
-  const ids = [...new Set(assignmentIds)]
-  const snapshots = await Promise.all(
-    Array.from({ length: Math.ceil(ids.length / 30) }, (_, index) => (
-      adminDb.collection('submissions')
-        .where('assignmentBatchId', 'in', ids.slice(index * 30, index * 30 + 30))
-        .get()
-    )),
-  )
-  return snapshots
-    .flatMap(snapshot => snapshot.docs)
-    .filter(document => document.data().gradingStatus !== 'pending')
-}
-
-async function organisationTests(organisationId: string) {
-  const collection = adminDb.collection('tests')
-  const snapshots = await Promise.all([
-    collection.where('organisationId', '==', organisationId).get(),
-    collection.where('createdBy', '==', organisationId).get(),
-  ])
-  return uniqueDocuments(snapshots).filter(document => {
-    const data = document.data()
-    const belongsToOrganisation = data.organisationId
-      ? data.organisationId === organisationId
-      : data.createdBy === organisationId
-    return belongsToOrganisation
-      && data.visibility === 'assigned'
-      && data.deletedAt == null
-      && data.published !== false
-  })
-}
-
-async function managementGroups(organisationId?: string) {
-  const snapshot = organisationId
-    ? await adminDb.collection('organisationGroups').where('organisationId', '==', organisationId).get()
-    : await adminDb.collection('organisationGroups').get()
-  return Promise.all(snapshot.docs.map(async document => ({
-    id: document.id,
-    name: String(document.data().name || 'Batch'),
-    members: (await document.ref.collection('members').get()).docs.map(member => ({
-      userId: String(member.data().userId || member.id),
-      userEmail: String(member.data().userEmail || ''),
-    })),
-  })))
-}
-
-async function managementUsers(organisationId?: string) {
-  if (!organisationId) {
-    const snapshot = await adminDb.collection('users').where('role', '==', 'user').get()
-    return snapshot.docs.map(document => ({
-      uid: document.id,
-      email: String(document.data().email || ''),
-      name: String(document.data().name || document.data().email || document.id),
-      role: 'user' as const,
-    }))
-  }
-
-  const invites = await adminDb.collection('organisationInvites')
-    .where('organisationId', '==', organisationId)
-    .get()
-  const acceptedStudents = invites.docs.filter(document => (
-    document.data().status === 'accepted'
-      && memberRole(document.data().memberRole) === 'student'
-  ))
-  const profiles = acceptedStudents.length
-    ? await adminDb.getAll(...acceptedStudents.map(document => (
-        adminDb.collection('users').doc(String(document.data().userId))
-      )))
-    : []
-  const profileById = new Map(profiles.map(profile => [profile.id, profile.data()]))
-  return acceptedStudents.map(document => {
-    const data = document.data()
-    const uid = String(data.userId)
-    const profile = profileById.get(uid)
-    const email = String(profile?.email || data.userEmail || '')
-    return {
-      uid,
-      email,
-      name: String(profile?.name || data.userName || email || uid),
-      role: 'user' as const,
-    }
-  })
-}
-
 export async function GET(request: Request) {
-  const auth = await requireRole(request, ['user', 'organisation', 'admin'])
+  const auth = await authenticateRequest(request)
   if ('error' in auth) return auth.error
-
   try {
-    const requestedOrganisationId = new URL(request.url).searchParams.get('organisationId')?.trim() || ''
-    let organisationId: string | undefined
-    if (auth.user.role === 'admin') {
-      if (requestedOrganisationId) {
-        const organisation = await adminDb.collection('users').doc(requestedOrganisationId).get()
-        if (!organisation.exists || organisation.data()?.role !== 'organisation') {
-          return Response.json({ error: 'The selected institute does not exist.' }, { status: 400 })
-        }
-        organisationId = requestedOrganisationId
-      }
+    const requested = new URL(request.url).searchParams.get('organizationId')
+      || new URL(request.url).searchParams.get('organisationId')
+      || auth.user.organizationId
+    const manager = requested ? await canManageOrganization(auth.user, requested) : auth.user.globalRole === 'admin'
+    const db = database()
+    let batches: (typeof assignmentBatches.$inferSelect)[]
+    if (manager) {
+      batches = await db.select().from(assignmentBatches)
+        .where(requested ? eq(assignmentBatches.organizationId, requested) : undefined)
+        .orderBy(desc(assignmentBatches.createdAt))
     } else {
-      const organisation = await contentOrganisationFor(auth.user, requestedOrganisationId || undefined)
-      if (!organisation) {
-        return Response.json({ error: 'Select an institute where you can manage assignments.' }, { status: 403 })
-      }
-      organisationId = organisation.id
+      batches = await db.select({ batch: assignmentBatches }).from(assignmentRecipients)
+        .innerJoin(assignmentBatches, eq(assignmentBatches.id, assignmentRecipients.assignmentBatchId))
+        .where(eq(assignmentRecipients.userId, auth.user.uid))
+        .orderBy(desc(assignmentBatches.createdAt))
+        .then(rows => rows.map(row => row.batch))
     }
-
-    const assignments = organisationId
-      ? await organisationAssignments(organisationId)
-      : (await adminDb.collection('assignmentBatches').get()).docs
-    const [tests, groups, users, submissions] = await Promise.all([
-      organisationId
-        ? organisationTests(organisationId)
-        : adminDb.collection('tests').where('visibility', '==', 'assigned').get()
-          .then(snapshot => snapshot.docs.filter(document => (
-            document.data().deletedAt == null && document.data().published !== false
-          ))),
-      managementGroups(organisationId),
-      managementUsers(organisationId),
-      assignmentSubmissions(assignments.map(document => document.id)),
-    ])
-
+    const batchIds = batches.map(item => item.id)
+    const recipients = batchIds.length ? await db.select({
+      assignmentBatchId: assignmentRecipients.assignmentBatchId,
+      userId: assignmentRecipients.userId,
+      attemptsUsed: assignmentRecipients.attemptsUsed,
+      userEmail: users.email,
+      userName: users.name,
+    }).from(assignmentRecipients)
+      .innerJoin(users, eq(users.id, assignmentRecipients.userId))
+      .where(inArray(assignmentRecipients.assignmentBatchId, batchIds)) : []
+    const testIds = [...new Set(batches.map(item => item.testId))]
+    const assignmentTests = testIds.length ? await db.select().from(tests).where(inArray(tests.id, testIds)) : []
+    const organizationId = requested || batches[0]?.organizationId
+    const allTests = manager && organizationId ? await db.select().from(tests).where(and(
+      eq(tests.organizationId, organizationId),
+      eq(tests.visibility, 'assigned'),
+    )) : []
+    const groups = manager && organizationId ? await db.select().from(organizationGroups).where(eq(organizationGroups.organizationId, organizationId)) : []
+    const groupIds = groups.map(item => item.id)
+    const groupMembers = groupIds.length ? await db.select({
+      groupId: organizationGroupMembers.groupId,
+      userId: organizationGroupMembers.userId,
+      userEmail: users.email,
+      userName: users.name,
+    }).from(organizationGroupMembers).innerJoin(users, eq(users.id, organizationGroupMembers.userId))
+      .where(inArray(organizationGroupMembers.groupId, groupIds)) : []
+    const members = manager && organizationId ? await db.select({
+      uid: users.id,
+      email: users.email,
+      name: users.name,
+      membershipRole: organizationMemberships.role,
+    }).from(organizationMemberships).innerJoin(users, eq(users.id, organizationMemberships.userId))
+      .where(and(eq(organizationMemberships.organizationId, organizationId), eq(organizationMemberships.status, 'accepted'))) : []
+    const submissions = manager && batchIds.length ? await db.select().from(testSubmissions).where(inArray(testSubmissions.assignmentBatchId, batchIds)) : []
     return Response.json({
-      organisationId: organisationId || null,
-      assignments: assignments.map(assignmentJson),
-      tests: tests.map(testJson),
-      groups,
-      users,
-      submissions: submissions.map(submissionJson),
+      tests: allTests.map(item => ({ ...item, organisationId: item.organizationId, createdAt: item.createdAt.toISOString() })),
+      groups: groups.map(group => ({ ...group, members: groupMembers.filter(member => member.groupId === group.id) })),
+      users: members,
+      submissions: submissions.map(item => ({ ...item, testCategory: item.categoryName, testExam: item.examName, submittedAt: item.submittedAt.toISOString() })),
+      assignments: batches.map(batch => {
+        const test = assignmentTests.find(item => item.id === batch.testId)
+        const ownRecipients = recipients.filter(item => item.assignmentBatchId === batch.id)
+        return {
+          id: batch.id,
+          organizationId: batch.organizationId,
+          organisationId: batch.organizationId,
+          name: batch.name,
+          testId: batch.testId,
+          testTitle: test?.title || 'Test',
+          audienceName: batch.audienceName,
+          assignedBy: batch.assignedBy,
+          recipients: ownRecipients,
+          assignedCount: ownRecipients.length,
+          maxAttempts: batch.maxAttempts,
+          startAt: batch.startAt.toISOString(),
+          deadline: batch.deadline.toISOString(),
+          createdAt: batch.createdAt.toISOString(),
+        }
+      }),
+      nextCursor: null,
     })
   } catch (error) {
     return errorResponse(error, 'Unable to load assignments.')
   }
 }
 
-async function repairMissingAssignmentDocuments(
-  taskId: string,
-  assignmentBatchId: string,
-  taskData: FirebaseFirestore.DocumentData,
-  batchData: FirebaseFirestore.DocumentData,
-) {
-  const assignees = Array.isArray(taskData.assignedUsers)
-    ? taskData.assignedUsers.filter((assignee: unknown): assignee is { userId: string; userEmail: string } => {
-      if (!assignee || typeof assignee !== 'object') return false
-      const candidate = assignee as { userId?: unknown; userEmail?: unknown }
-      return typeof candidate.userId === 'string' && typeof candidate.userEmail === 'string'
-    })
-    : []
-  for (let index = 0; index < assignees.length; index += 450) {
-    const chunk = assignees.slice(index, index + 450)
-    const references = chunk.map(assignee => (
-      adminDb.collection('testAssignments').doc(assignmentInstanceId(assignmentBatchId, assignee.userId))
-    ))
-    const snapshots = await adminDb.getAll(...references)
-    const missing = snapshots
-      .map((snapshot, snapshotIndex) => ({ snapshot, assignee: chunk[snapshotIndex] }))
-      .filter(item => !item.snapshot.exists)
-    if (!missing.length) continue
-    const write = adminDb.batch()
-    missing.forEach(({ snapshot, assignee }) => write.set(snapshot.ref, {
-      testId: batchData.testId,
-      testTitle: batchData.testTitle,
-      userId: assignee.userId,
-      userEmail: assignee.userEmail,
-      assignedBy: batchData.assignedBy,
-      assignmentBatchId,
-      assignmentName: batchData.name,
-      linkedTaskId: taskId,
-      maxAttempts: batchData.maxAttempts,
-      attemptsUsed: 0,
-      startAt: batchData.startAt,
-      deadline: batchData.deadline,
-      endAt: batchData.endAt,
-      createdAt: batchData.createdAt,
-    }))
-    await write.commit()
-  }
-}
-
 export async function POST(request: Request) {
-  const auth = await requireRole(request, ['user', 'organisation', 'admin'])
+  const auth = await authenticateRequest(request)
   if ('error' in auth) return auth.error
   try {
-    const body = await request.json().catch(() => null)
-    const parsed = createAssignmentSchema.safeParse(body)
-    if (!parsed.success) {
-      return Response.json({ error: 'Invalid assignment details.', issues: parsed.error.issues }, { status: 400 })
+    const parsed = createSchema.safeParse(await request.json())
+    if (!parsed.success) return Response.json({ error: 'Invalid assignment.', issues: parsed.error.issues }, { status: 400 })
+    if (!(await canManageOrganization(auth.user, parsed.data.organizationId))) {
+      return Response.json({ error: 'Organization manager access required.' }, { status: 403 })
     }
-    const input = parsed.data
-    const organisation = auth.user.role === 'admin'
-      ? null
-      : await contentOrganisationFor(auth.user, input.organisationId)
-    if (auth.user.role !== 'admin' && !organisation) {
-      return Response.json({ error: 'Select an institute where you are an accepted teacher.' }, { status: 403 })
-    }
-    const now = new Date()
-    const startAt = new Date(input.startAt)
-    const deadline = new Date(input.deadline)
-    if (deadline <= startAt) {
-      return Response.json({ error: 'The deadline must be after the start time.' }, { status: 400 })
-    }
-    if (deadline <= now) {
-      return Response.json({ error: 'The deadline must be in the future.' }, { status: 400 })
-    }
-
-    const [test, existingTask, existingBatch] = await Promise.all([
-      adminDb.collection('tests').doc(input.testId).get(),
-      adminDb.collection('tasks').doc(input.taskId).get(),
-      adminDb.collection('assignmentBatches').doc(input.assignmentBatchId).get(),
-    ])
-    if (!test.exists || test.data()?.deletedAt != null || test.data()?.published === false || test.data()?.visibility !== 'assigned') {
-      return Response.json({ error: 'Select a published Assigned-mode test.' }, { status: 400 })
-    }
-    if (auth.user.role !== 'admin' && test.data()?.organisationId !== organisation?.id) {
-      return Response.json({ error: 'You can only assign tests from the selected institute.' }, { status: 403 })
-    }
-    if (existingTask.exists || existingBatch.exists) {
-      const matchingTask = existingTask.data()?.createdBy === auth.user.uid
-        && existingTask.data()?.linkedAssignmentBatchId === input.assignmentBatchId
-      const matchingBatch = existingBatch.data()?.assignedBy === auth.user.uid
-        && existingBatch.data()?.linkedTaskId === input.taskId
-      if (!matchingTask || !matchingBatch) {
-        return Response.json({ error: 'One of the submitted IDs is already in use.' }, { status: 409 })
+    const startAt = new Date(parsed.data.startAt)
+    const deadline = new Date(parsed.data.deadline)
+    if (deadline <= startAt) return Response.json({ error: 'Deadline must be after the start.' }, { status: 400 })
+    const db = database()
+    const result = await db.transaction(async tx => {
+      const test = (await tx.select().from(tests).where(eq(tests.id, parsed.data.testId)).limit(1))[0]
+      if (!test || test.organizationId !== parsed.data.organizationId || test.visibility !== 'assigned') {
+        throw new Error('Select an assigned-mode test from this organization.')
       }
-      await repairMissingAssignmentDocuments(
-        input.taskId,
-        input.assignmentBatchId,
-        existingTask.data()!,
-        existingBatch.data()!,
-      )
-      const existingStart = existingTask.data()?.startAt?.toDate() || null
-      const existingEnd = existingTask.data()?.endAt?.toDate() || null
-      await ensureTaskEmailJobs({
-        taskId: input.taskId,
-        createdAt: existingTask.data()?.createdAt?.toDate() || now,
-        startAt: existingStart,
-        endAt: existingEnd,
+      let recipientIds: string[] = []
+      let audienceName = 'Student'
+      let groupId: string | null = null
+      if (parsed.data.targetType === 'group') {
+        const group = (await tx.select().from(organizationGroups).where(and(
+          eq(organizationGroups.id, parsed.data.targetId),
+          eq(organizationGroups.organizationId, parsed.data.organizationId),
+        )).limit(1))[0]
+        if (!group) throw new Error('Group not found.')
+        groupId = group.id
+        audienceName = group.name
+        recipientIds = (await tx.select().from(organizationGroupMembers).where(eq(organizationGroupMembers.groupId, group.id))).map(item => item.userId)
+      } else {
+        const membership = (await tx.select().from(organizationMemberships).where(and(
+          eq(organizationMemberships.organizationId, parsed.data.organizationId),
+          eq(organizationMemberships.userId, parsed.data.targetId),
+          eq(organizationMemberships.status, 'accepted'),
+        )).limit(1))[0]
+        if (!membership) throw new Error('Student not found.')
+        recipientIds = [membership.userId]
+        audienceName = (await tx.select().from(users).where(eq(users.id, membership.userId)).limit(1))[0]?.name || 'Student'
+      }
+      if (!recipientIds.length) throw new Error('The selected audience has no members.')
+      const [batch] = await tx.insert(assignmentBatches).values({
+        organizationId: parsed.data.organizationId,
+        testId: test.id,
+        assignedBy: auth.user.uid,
+        name: parsed.data.name,
+        audienceName,
+        startAt,
+        deadline,
+        maxAttempts: parsed.data.maxAttempts,
+      }).returning()
+      await tx.insert(assignmentRecipients).values(recipientIds.map(userId => ({ assignmentBatchId: batch.id, userId })))
+      const [task] = await tx.insert(tasks).values({
+        organizationId: parsed.data.organizationId,
+        createdBy: auth.user.uid,
+        assignmentBatchId: batch.id,
+        title: parsed.data.name,
+        description: `Complete ${test.title}.`,
+        type: 'basic',
+        startAt,
+        endAt: deadline,
+      }).returning()
+      await tx.insert(taskAssignees).values(recipientIds.map(userId => ({ taskId: task.id, userId })))
+      if (groupId) await tx.insert(taskGroups).values({ taskId: task.id, groupId })
+      await tx.insert(taskActivity).values({ taskId: task.id, actorUserId: auth.user.uid, type: 'created', data: { assignmentBatchId: batch.id } })
+      await tx.insert(emailJobs).values({
+        kind: 'assignment_assigned',
+        organizationId: parsed.data.organizationId,
+        entityType: 'assignment',
+        entityId: batch.id,
+        payload: { recipientIds },
+        scheduledFor: new Date(),
+        dedupeKey: `assignment:${batch.id}:assigned`,
       })
-      queueImmediateDelivery(input.taskId)
-      return Response.json({ taskId: input.taskId, assignmentBatchId: input.assignmentBatchId, existing: true })
-    }
-
-    const audience = await resolveAssignmentAudience({
-      actorId: auth.user.uid,
-      actorRole: auth.user.role === 'admin' ? 'admin' : 'organisation',
-      organisationId: organisation?.id,
-      targetType: input.targetType,
-      targetId: input.targetId,
+      await tx.insert(notifications).values(recipientIds.map(userId => ({
+        type: 'assignment_assigned',
+        recipientUserId: userId,
+        title: parsed.data.name,
+        detail: `${test.title} is available from ${startAt.toLocaleString()} until ${deadline.toLocaleString()}.`,
+        href: `/tests/${test.id}?assignment=${batch.id}`,
+        tone: 'indigo',
+        icon: 'assignment',
+        dedupeKey: `assignment:${batch.id}:user:${userId}`,
+        visibleAt: new Date(),
+      })))
+      return batch.id
     })
-    const testData = test.data()!
-    const batchReference = adminDb.collection('assignmentBatches').doc(input.assignmentBatchId)
-    const taskReference = adminDb.collection('tasks').doc(input.taskId)
-    const baseAssignment = {
-      testId: input.testId,
-      testTitle: String(testData.title),
-      ...(organisation ? { organisationId: organisation.id } : {}),
-      assignedBy: auth.user.uid,
-      assignmentBatchId: input.assignmentBatchId,
-      assignmentName: input.name,
-      linkedTaskId: input.taskId,
-      maxAttempts: input.maxAttempts,
-      attemptsUsed: 0,
-      startAt: Timestamp.fromDate(startAt),
-      deadline: Timestamp.fromDate(deadline),
-      endAt: Timestamp.fromDate(deadline),
-      createdAt: Timestamp.fromDate(now),
-    }
-
-    const firstWrite = adminDb.batch()
-    firstWrite.create(batchReference, {
-      name: input.name,
-      testId: input.testId,
-      testTitle: String(testData.title),
-      exam: testData.exam || 'Uncategorised',
-      assignedBy: auth.user.uid,
-      ...(organisation ? { organisationId: organisation.id } : {}),
-      audienceName: audience.audienceName,
-      assignedUserIds: audience.assignees.map(assignee => assignee.userId),
-      assignedCount: audience.assignees.length,
-      maxAttempts: input.maxAttempts,
-      linkedTaskId: input.taskId,
-      startAt: Timestamp.fromDate(startAt),
-      deadline: Timestamp.fromDate(deadline),
-      endAt: Timestamp.fromDate(deadline),
-      createdAt: Timestamp.fromDate(now),
-    })
-    firstWrite.create(taskReference, {
-      organisationId: organisation?.id || auth.user.uid,
-      createdBy: auth.user.uid,
-      createdByName: auth.user.name,
-      organisationName: organisation?.name || auth.user.name,
-      title: input.name,
-      description: `Complete the assigned test “${String(testData.title)}” before the assignment deadline.`,
-      taskType: 'basic',
-      sourceType: 'assignment',
-      linkedAssignmentBatchId: input.assignmentBatchId,
-      linkedTestId: input.testId,
-      status: 'todo',
-      assignedUserIds: audience.assignees.map(assignee => assignee.userId),
-      assignedUsers: audience.assignees,
-      assignedGroupIds: input.targetType === 'group' ? [input.targetId] : [],
-      audienceNames: audience.audienceName ? [audience.audienceName] : [],
-      attachments: [],
-      isClosed: false,
-      startAt: Timestamp.fromDate(startAt),
-      endAt: Timestamp.fromDate(deadline),
-      createdAt: Timestamp.fromDate(now),
-      updatedAt: Timestamp.fromDate(now),
-      statusUpdatedAt: Timestamp.fromDate(now),
-      statusUpdatedBy: auth.user.uid,
-      statusUpdatedByName: auth.user.name,
-    })
-    audience.assignees.slice(0, 448).forEach(assignee => {
-      firstWrite.set(adminDb.collection('testAssignments').doc(assignmentInstanceId(input.assignmentBatchId, assignee.userId)), {
-        ...baseAssignment,
-        userId: assignee.userId,
-        userEmail: assignee.userEmail,
-      })
-    })
-    await firstWrite.commit()
-    for (let index = 448; index < audience.assignees.length; index += 450) {
-      const write = adminDb.batch()
-      audience.assignees.slice(index, index + 450).forEach(assignee => {
-        write.set(adminDb.collection('testAssignments').doc(assignmentInstanceId(input.assignmentBatchId, assignee.userId)), {
-          ...baseAssignment,
-          userId: assignee.userId,
-          userEmail: assignee.userEmail,
-        })
-      })
-      await write.commit()
-    }
-
-    await ensureTaskEmailJobs({ taskId: input.taskId, createdAt: now, startAt, endAt: deadline })
-    queueImmediateDelivery(input.taskId)
-    return Response.json({ taskId: input.taskId, assignmentBatchId: input.assignmentBatchId }, { status: 201 })
+    return Response.json({ id: result }, { status: 201 })
   } catch (error) {
-    return errorResponse(error, 'Unable to create the assignment.')
+    return errorResponse(error, 'Unable to create assignment.')
   }
 }

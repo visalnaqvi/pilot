@@ -6,6 +6,8 @@ export type QuestionContent = {
   format?: QuestionFormat
   promptImageUrl?: string
   optionImageUrls?: string[]
+  promptImagePath?: string
+  optionImagePaths?: string[]
 }
 export type Question = QuestionContent & { marks: number }
 export type LearnerQuestion =
@@ -60,7 +62,7 @@ export type MockTest = {
   questionCount?: number
   totalMarks?: number
   createdBy: string
-  createdAt?: { toDate: () => Date } | null
+  createdAt?: { toDate: () => Date } | string | null
   visibility: 'public' | 'private' | 'assigned'
   /** Legacy field retained while old test records are read. Private tests now have unlimited attempts. */
   attemptLimit?: number
@@ -94,18 +96,19 @@ export type Submission = {
   questionCount: number
   /** Immutable per-question snapshot saved when the learner submits a test. */
   answers?: SubmissionAnswer[]
-  /** Organisations the user belonged to when they submitted the test. */
-  organisationIds: string[]
   /** True when the platform submitted the attempt instead of the learner. */
   autoSubmitted?: boolean
   autoSubmitReason?: 'time_expired' | 'fullscreen_exited'
   testVisibility?: 'public' | 'private' | 'assigned'
   attemptNumber?: number
   assignmentBatchId?: string
-  submittedAt?: { toDate: () => Date }
+  /** Derived from relational access rows for filtering; it is not persisted as an array. */
+  organizationIds?: string[]
+  submittedAt?: { toDate: () => Date } | string
 }
 
 export type SubmissionAnswer = {
+  id?: string
   kind?: 'mcq' | 'short_answer'
   questionIndex: number
   prompt: string

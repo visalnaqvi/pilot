@@ -11,6 +11,11 @@ const nextConfig: NextConfig = {
         hostname: 'firebasestorage.googleapis.com',
         pathname: '/v0/b/mock-test-app-b659d.firebasestorage.app/o/**',
       },
+      {
+        protocol: 'https',
+        hostname: 'storage.googleapis.com',
+        pathname: '/**',
+      },
     ],
   },
 };

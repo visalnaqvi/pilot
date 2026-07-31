@@ -3,8 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import ReactECharts from 'echarts-for-react'
-import { collection, doc, getDoc, onSnapshot, query, where } from 'firebase/firestore'
-import { db } from '@/lib/firebase'
+import { authenticatedFetch } from '@/lib/authenticated-fetch'
 import { useAuth } from './auth-context'
 import { SearchPicker } from './search-picker'
 import { paginate, Pagination } from './pagination'
@@ -32,16 +31,12 @@ type ExamInsight = {
   best: number
   accuracy: number
 }
-type Invite = {
-  organisationId: string
-  organisationName?: string
-  organisationEmail?: string
-  status: 'pending' | 'accepted' | 'declined'
-}
-
 const scorePercent = (item: Submission) => item.totalMarks ? item.score / item.totalMarks * 100 : 0
 const accuracyPercent = (item: Submission) => item.questionCount ? item.correctAnswers / item.questionCount * 100 : 0
-const submittedAt = (item: Submission) => item.submittedAt?.toDate?.()
+const submittedAt = (item: Submission) => {
+  if (!item.submittedAt) return undefined
+  return typeof item.submittedAt === 'string' ? new Date(item.submittedAt) : item.submittedAt.toDate()
+}
 const dateKey = (item: Submission) => {
   const date = submittedAt(item)
   return date ? `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}` : ''
@@ -58,65 +53,48 @@ export function UserDashboard() {
 
   useEffect(() => {
     if (!user || profile?.role !== 'user') return
-    return onSnapshot(
-      query(collection(db, 'submissions'), where('userId', '==', user.uid)),
-      snapshot => setSubmissions(snapshot.docs
-        .map(item => ({ id: item.id, ...item.data() }) as Submission)
+    let active = true
+    void Promise.all([
+      authenticatedFetch(user, '/api/test-submissions', { cache: 'no-store' }),
+      authenticatedFetch(user, '/api/organizations', { cache: 'no-store' }),
+      authenticatedFetch(user, '/api/tests', { cache: 'no-store' }),
+    ]).then(async ([submissionResponse, organizationResponse, testResponse]) => {
+      const [submissionData, organizationData, testData] = await Promise.all([
+        submissionResponse.json(),
+        organizationResponse.json(),
+        testResponse.json(),
+      ])
+      if (!submissionResponse.ok) throw new Error(submissionData.error || 'Unable to load submissions.')
+      if (!organizationResponse.ok) throw new Error(organizationData.error || 'Unable to load institutes.')
+      if (!testResponse.ok) throw new Error(testData.error || 'Unable to load tests.')
+      if (!active) return
+      setSubmissions(((submissionData.items || []) as Submission[])
         .filter(item => item.gradingStatus !== 'pending')
-        .sort((a, b) => (submittedAt(b)?.getTime() || 0) - (submittedAt(a)?.getTime() || 0))),
-      reason => setError(reason.message),
-    )
-  }, [profile?.role, user])
-
-  useEffect(() => {
-    if (!user || profile?.role !== 'user') return
-    let active = true
-    const stop = onSnapshot(
-      query(collection(db, 'organisationInvites'), where('userId', '==', user.uid)),
-      snapshot => {
-        const accepted = snapshot.docs.map(item => item.data() as Invite).filter(item => item.status === 'accepted')
-        void Promise.all(accepted.map(async invite => {
-          const email = invite.organisationEmail || invite.organisationId
-          if (invite.organisationName) return { id: invite.organisationId, name: invite.organisationName, email }
-          try {
-            const organisation = await getDoc(doc(db, 'users', invite.organisationId))
-            const name = organisation.data()?.name
-            return { id: invite.organisationId, name: typeof name === 'string' && name.trim() ? name : email, email }
-          } catch {
-            return { id: invite.organisationId, name: email, email }
-          }
-        })).then(items => {
-          if (active) setOrganisations(items.sort((a, b) => a.name.localeCompare(b.name)))
-        })
-      },
-      reason => setError(reason.message),
-    )
-    return () => { active = false; stop() }
-  }, [profile?.role, user])
-
-  useEffect(() => {
-    let active = true
-    const ids = [...new Set(submissions.map(item => item.testId))]
-    if (!ids.length) return
-    void Promise.all(ids.map(async id => {
-      try {
-        const snapshot = await getDoc(doc(db, 'tests', id))
-        const data = snapshot.exists() ? snapshot.data() : null
-        return [id, {
-          exam: typeof data?.exam === 'string' ? data.exam : 'Unassigned',
-          examId: typeof data?.examId === 'string' ? data.examId : undefined,
-          category: typeof data?.category === 'string' ? data.category : 'Uncategorised',
-          organisationId: typeof data?.organisationId === 'string' ? data.organisationId : undefined,
-          createdBy: typeof data?.createdBy === 'string' ? data.createdBy : undefined,
-        }] as const
-      } catch {
-        return null
-      }
-    })).then(entries => {
-      if (active) setTestInfo(Object.fromEntries(entries.filter((item): item is NonNullable<typeof item> => item !== null)))
+        .sort((a, b) => (submittedAt(b)?.getTime() || 0) - (submittedAt(a)?.getTime() || 0)))
+      setOrganisations((organizationData.items || []).map((item: { id: string; name: string }) => ({
+        id: item.id,
+        name: item.name,
+        email: '',
+      })).sort((a: JoinedOrganisation, b: JoinedOrganisation) => a.name.localeCompare(b.name)))
+      setTestInfo(Object.fromEntries((testData.items || []).map((item: {
+        id: string
+        exam?: string
+        examId?: string
+        category?: string
+        organisationId?: string
+        createdBy?: string
+      }) => [item.id, {
+        exam: item.exam || 'Unassigned',
+        examId: item.examId,
+        category: item.category || 'Uncategorised',
+        organisationId: item.organisationId,
+        createdBy: item.createdBy,
+      }])))
+    }).catch(reason => {
+      if (active) setError(reason instanceof Error ? reason.message : 'Unable to load dashboard.')
     })
     return () => { active = false }
-  }, [submissions])
+  }, [profile?.role, user])
 
   const examOf = useCallback((item: Submission) => item.testExam || testInfo[item.testId]?.exam || 'Unassigned', [testInfo])
   const filtered = submissions
@@ -184,7 +162,7 @@ export function UserDashboard() {
     <section className="mt-6 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="border-b border-slate-200 bg-slate-50 px-5 py-4"><h2 className="font-black text-slate-950">Performance by exam</h2><p className="mt-1 text-sm text-slate-500">Every value is calculated only from your attempts.</p></div>
         <div className="hidden grid-cols-[minmax(130px,1.4fr)_repeat(5,minmax(75px,1fr))] gap-3 border-b border-slate-200 px-5 py-3 text-xs font-bold tracking-wide text-slate-500 lg:grid"><span>EXAM</span><span>TESTS</span><span>ATTEMPTS</span><span>AVG SCORE</span><span>BEST</span><span>ACCURACY</span></div>
-        {visibleExams.items.map(item => <button type="button" key={item.name} onClick={() => setOpenedExam(item)} className="grid w-full gap-3 border-b border-slate-100 px-5 py-4 text-left hover:bg-indigo-50 last:border-0 lg:grid-cols-[minmax(130px,1.4fr)_repeat(5,minmax(75px,1fr))] lg:items-center"><div><p className="font-bold text-slate-950">{item.name}</p><p className="mt-1 text-xs text-slate-500">Open exam details</p></div><TableCell label="Tests" value={item.tests} /><TableCell label="Attempts" value={item.attempts} /><TableCell label="Avg score" value={`${Math.round(item.average)}%`} /><TableCell label="Best" value={`${Math.round(item.best)}%`} /><TableCell label="Accuracy" value={`${Math.round(item.accuracy)}%`} /></button>)}
+        {visibleExams.items.map(item => <button type="button" key={item.name} onClick={() => setOpenedExam(item)} className="grid w-full gap-3 border-b border-slate-100 px-5 py-4 text-left hover:bg-indigo-50 last:border-0 lg:grid-cols-[minmax(130px,1.4fr)_repeat(5,minmax(75px,1fr))] lg:items-center"><div><p className="font-bold text-slate-950">{item.name}</p><p className="mt-1 text-xs text-slate-500">Open performance dashboard</p></div><TableCell label="Tests" value={item.tests} /><TableCell label="Attempts" value={item.attempts} /><TableCell label="Avg score" value={`${Math.round(item.average)}%`} /><TableCell label="Best" value={`${Math.round(item.best)}%`} /><TableCell label="Accuracy" value={`${Math.round(item.accuracy)}%`} /></button>)}
         {!insights.exams.length && <p className="p-6 text-slate-500">No completed tests match these filters.</p>}
         <Pagination page={visibleExams.page} totalItems={insights.exams.length} onPageChange={setExamPage} itemLabel="exams" />
     </section>
@@ -214,7 +192,7 @@ function UserExamModal({
   const belongsToOrganisation = useCallback((item: Submission, id: string) => {
     const info = testInfo[item.testId]
     const ownerId = info?.organisationId || info?.createdBy
-    return ownerId ? ownerId === id : item.organisationIds?.includes(id)
+    return ownerId === id
   }, [testInfo])
   const organisationAttempts = useMemo(
     () => organisationId ? allAttempts.filter(item => belongsToOrganisation(item, organisationId)) : allAttempts,

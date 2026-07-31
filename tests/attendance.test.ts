@@ -138,7 +138,9 @@ test('opening an attendance occurrence defaults to attendance and supports cance
 test('legacy institute memberships remain students and teacher roles are explicit', () => {
   assert.equal(memberRole(undefined), 'student')
   assert.equal(memberRole('teacher'), 'teacher')
+  assert.equal(memberRole('owner'), null)
   assert.equal(isAcceptedMember({ status: 'accepted' }, 'student'), true)
   assert.equal(isAcceptedMember({ status: 'accepted', memberRole: 'teacher' }, 'student'), false)
   assert.equal(isAcceptedMember({ status: 'accepted', memberRole: 'teacher' }, 'teacher'), true)
+  assert.equal(isAcceptedMember({ status: 'accepted', memberRole: 'owner' }, 'student'), false)
 })

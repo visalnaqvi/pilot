@@ -1,17 +1,16 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { collection, deleteDoc, doc, getDocs, onSnapshot, query, serverTimestamp, setDoc, updateDoc, where } from 'firebase/firestore'
-import { db } from '@/lib/firebase'
+import { authenticatedFetch } from '@/lib/authenticated-fetch'
 import { useAuth, type UserProfile } from './auth-context'
 import { OrganisationUserDashboardModal } from './exam-dashboard'
 import { paginate, Pagination } from './pagination'
 import type { MockTest, Submission } from './test-types'
-import { memberRole, type MemberRole } from '@/lib/membership'
+import { memberRole, type MemberRole, type OrganizationMembershipRole } from '@/lib/membership'
 
-type OrganisationInvite = { id: string; organisationId: string; organisationName?: string; organisationEmail: string; userId: string; userName?: string; userEmail: string; initiatedBy?: 'organisation' | 'user'; status: 'pending' | 'accepted' | 'declined'; memberRole?: MemberRole }
+type OrganisationInvite = { id: string; organisationId: string; organisationName?: string; organisationEmail: string; userId: string; userName?: string; userEmail: string; initiatedBy?: 'organisation' | 'user'; status: 'pending' | 'accepted' | 'declined'; memberRole?: OrganizationMembershipRole }
 type Group = { id: string; name: string; targetExamId?: string; targetExamName?: string; members: { userId: string }[] }
-type AttendanceSessionSummary = { status: string; roster: { userId: string; status: string }[] }
+type AttendanceSessionSummary = { status: string; roster: { userId: string; status?: string; mark?: string }[] }
 
 const score = (item: Submission) => item.totalMarks ? item.score / item.totalMarks * 100 : 0
 
@@ -36,9 +35,52 @@ export function OrganisationUsers() {
   const [teachersPage, setTeachersPage] = useState(1)
   const [invitesPage, setInvitesPage] = useState(1)
 
-  useEffect(() => { if (!user || !allowed) return; return onSnapshot(query(collection(db, 'organisationInvites'), where('organisationId', '==', user.uid)), snapshot => setInvites(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as OrganisationInvite)), reason => setMessage(`Could not load invitations: ${reason.message}`)) }, [allowed, user])
-  useEffect(() => { if (!user || !allowed) return; return onSnapshot(collection(db, 'users'), snapshot => setAccounts(snapshot.docs.map(item => ({ uid: item.id, ...item.data() }) as UserProfile).filter(account => account.role === 'user')), reason => setMessage(`Could not load students: ${reason.message}`)) }, [allowed, user])
-  useEffect(() => { if (!user || !allowed) return; return onSnapshot(query(collection(db, 'submissions'), where('organisationIds', 'array-contains', user.uid)), snapshot => setSubmissions(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as Submission).filter(item => item.gradingStatus !== 'pending')), reason => setMessage(`Could not load scores: ${reason.message}`)) }, [allowed, user])
+  useEffect(() => {
+    const organizationId = profile?.organizationId
+    if (!user || !allowed || !organizationId) return
+    let active = true
+    void Promise.all([
+      authenticatedFetch(user, `/api/memberships?organizationId=${organizationId}`, { cache: 'no-store' }),
+      authenticatedFetch(user, '/api/users?directory=1', { cache: 'no-store' }),
+      authenticatedFetch(user, '/api/test-submissions', { cache: 'no-store' }),
+      authenticatedFetch(user, `/api/groups?organizationId=${organizationId}`, { cache: 'no-store' }),
+    ]).then(async responses => {
+      const payloads = await Promise.all(responses.map(response => response.json()))
+      const failed = responses.findIndex(response => !response.ok)
+      if (failed >= 0) throw new Error(payloads[failed].error || 'Unable to load institute members.')
+      if (!active) return
+      setInvites((payloads[0].items || []).map((item: {
+        organizationId: string
+        organizationName: string
+        userId: string
+        email: string
+        name?: string
+        status: OrganisationInvite['status']
+        role: OrganizationMembershipRole
+        initiatedBy?: string
+      }) => ({
+        id: `${item.organizationId}:${item.userId}`,
+        organisationId: item.organizationId,
+        organisationName: item.organizationName,
+        organisationEmail: profile.email,
+        userId: item.userId,
+        userName: item.name,
+        userEmail: item.email,
+        initiatedBy: item.initiatedBy === item.userId ? 'user' : 'organisation',
+        status: item.status,
+        memberRole: item.role,
+      })))
+      setAccounts((payloads[1].items || []) as UserProfile[])
+      setSubmissions(((payloads[2].items || []) as Submission[]).filter(item => item.gradingStatus !== 'pending').map(item => typeof item.submittedAt === 'string'
+        ? { ...item, submittedAt: { toDate: () => new Date(item.submittedAt as string) } }
+        : item))
+      setGroups((payloads[3].items || []) as Group[])
+      setMessage('')
+    }).catch(reason => {
+      if (active) setMessage(reason instanceof Error ? reason.message : 'Unable to load institute members.')
+    })
+    return () => { active = false }
+  }, [allowed, profile?.email, profile?.organizationId, user])
   useEffect(() => {
     if (!user || !allowed) return
     let active = true
@@ -50,8 +92,8 @@ export function OrganisationUsers() {
         ;(payload.sessions || []).filter(session => session.status === 'submitted').forEach(session => {
           session.roster.forEach(record => {
             const current = values[record.userId] || { present: 0, absent: 0 }
-            if (record.status === 'present') current.present += 1
-            if (record.status === 'absent') current.absent += 1
+            if ((record.status || record.mark) === 'present') current.present += 1
+            if ((record.status || record.mark) === 'absent') current.absent += 1
             values[record.userId] = current
           })
         })
@@ -59,21 +101,11 @@ export function OrganisationUsers() {
       }).catch(() => undefined)
     return () => { active = false }
   }, [allowed, user])
-  useEffect(() => {
-    if (!user || !allowed) return
-    return onSnapshot(query(collection(db, 'organisationGroups'), where('organisationId', '==', user.uid)), async snapshot => {
-      try {
-        const loaded = await Promise.all(snapshot.docs.map(async item => ({ id: item.id, name: item.data().name as string, targetExamId: item.data().targetExamId as string | undefined, targetExamName: item.data().targetExamName as string | undefined, members: (await getDocs(collection(item.ref, 'members'))).docs.map(member => ({ userId: member.data().userId as string })) })))
-        setGroups(loaded)
-      } catch { setMessage('Could not load student batches.') }
-    })
-  }, [allowed, user])
-
   const tests = useMemo(() => [...new Map(submissions.map(item => [item.testId, { id: item.testId, title: item.testTitle, exam: item.testExam, examId: item.testExamId, category: item.testCategory, description: '', durationMinutes: 0, createdBy: '', visibility: 'public' as const } satisfies MockTest])).values()], [submissions])
   const pending = invites.filter(invite => invite.status === 'pending' && invite.initiatedBy !== 'user')
   const joinRequests = invites.filter(invite => invite.status === 'pending' && invite.initiatedBy === 'user')
-  const studentMemberships = invites.filter(invite => invite.status === 'accepted' && memberRole(invite.memberRole) === 'student')
-  const teacherMemberships = invites.filter(invite => invite.status === 'accepted' && memberRole(invite.memberRole) === 'teacher')
+  const studentMemberships = invites.filter(invite => invite.userId !== user?.uid && invite.status === 'accepted' && memberRole(invite.memberRole) === 'student')
+  const teacherMemberships = invites.filter(invite => invite.userId !== user?.uid && invite.status === 'accepted' && memberRole(invite.memberRole) === 'teacher')
   const joined = studentMemberships.map(invite => accounts.find(account => account.uid === invite.userId) || { uid: invite.userId, email: invite.userEmail, name: invite.userEmail, role: 'user' as const })
   const teachers = teacherMemberships.map(invite => accounts.find(account => account.uid === invite.userId) || { uid: invite.userId, email: invite.userEmail, name: invite.userEmail, role: 'user' as const })
   const visibleRequests = paginate(joinRequests, requestsPage)
@@ -81,22 +113,54 @@ export function OrganisationUsers() {
   const visibleTeachers = paginate(teachers, teachersPage)
   const visibleInvites = paginate(pending, invitesPage)
   const normalizedTerm = term.trim().toLowerCase()
-  const suggestions = normalizedTerm ? accounts.filter(account => `${account.name || ''} ${account.email}`.toLowerCase().includes(normalizedTerm)).sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email)).slice(0, 8) : []
+  const suggestions = normalizedTerm ? accounts.filter(account => account.uid !== user?.uid && `${account.name || ''} ${account.email}`.toLowerCase().includes(normalizedTerm)).sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email)).slice(0, 8) : []
 
   async function invite(account: UserProfile) {
     if (!user || !profile) return
     setSending(account.uid); setMessage('')
     try {
-      await setDoc(doc(db, 'organisationInvites', `${user.uid}_${account.uid}`), { organisationId: user.uid, organisationName: profile.name || profile.email, organisationEmail: profile.email, userId: account.uid, userName: account.name || account.email, userEmail: account.email, initiatedBy: 'organisation', status: 'pending', memberRole: 'student', createdAt: serverTimestamp() })
+      if (!profile.organizationId) throw new Error('Institute profile unavailable.')
+      const response = await authenticatedFetch(user, '/api/memberships', {
+        method: 'POST',
+        body: JSON.stringify({ organizationId: profile.organizationId, email: account.email, role: 'student' }),
+      })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || 'Unable to send invitation.')
+      setInvites(current => [...current.filter(item => item.userId !== account.uid), {
+        id: `${profile.organizationId}:${account.uid}`,
+        organisationId: profile.organizationId!,
+        organisationName: profile.name,
+        organisationEmail: profile.email,
+        userId: account.uid,
+        userName: account.name || account.email,
+        userEmail: account.email,
+        initiatedBy: 'organisation',
+        status: 'pending',
+        memberRole: 'student',
+      }])
       setMessage(`Invitation sent to ${account.email}.`); setTerm('')
     } catch (reason) { setMessage(reason instanceof Error ? reason.message : 'Unable to send invitation.') } finally { setSending('') }
   }
-  async function withdraw(invite: OrganisationInvite) { try { await deleteDoc(doc(db, 'organisationInvites', invite.id)); setMessage(`Invitation to ${invite.userEmail} withdrawn.`) } catch (reason) { setMessage(reason instanceof Error ? reason.message : 'Unable to withdraw invitation.') } }
+  async function withdraw(invite: OrganisationInvite) {
+    try {
+      if (!user) return
+      const response = await authenticatedFetch(user, `/api/memberships?organizationId=${invite.organisationId}&userId=${encodeURIComponent(invite.userId)}`, { method: 'DELETE' })
+      if (!response.ok) throw new Error((await response.json()).error || 'Unable to withdraw invitation.')
+      setInvites(current => current.filter(item => item.id !== invite.id))
+      setMessage(`Invitation to ${invite.userEmail} withdrawn.`)
+    } catch (reason) { setMessage(reason instanceof Error ? reason.message : 'Unable to withdraw invitation.') }
+  }
   async function respondToRequest(invite: OrganisationInvite, status: 'accepted' | 'declined') {
     setResponding(invite.id)
     setMessage('')
     try {
-      await updateDoc(doc(db, 'organisationInvites', invite.id), { status, respondedAt: serverTimestamp() })
+      if (!user) return
+      const response = await authenticatedFetch(user, '/api/memberships', {
+        method: 'PATCH',
+        body: JSON.stringify({ organizationId: invite.organisationId, userId: invite.userId, status }),
+      })
+      if (!response.ok) throw new Error((await response.json()).error || 'Unable to respond to join request.')
+      setInvites(current => current.map(item => item.id === invite.id ? { ...item, status } : item))
       setMessage(status === 'accepted' ? `${invite.userName || invite.userEmail} joined your institute.` : 'Join request declined.')
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : 'Unable to respond to join request.')
@@ -110,7 +174,10 @@ export function OrganisationUsers() {
     setRemoving(invite.id)
     setMessage('')
     try {
-      await deleteDoc(doc(db, 'organisationInvites', invite.id))
+      if (!user) return
+      const response = await authenticatedFetch(user, `/api/memberships?organizationId=${invite.organisationId}&userId=${encodeURIComponent(invite.userId)}`, { method: 'DELETE' })
+      if (!response.ok) throw new Error((await response.json()).error || 'Unable to remove member.')
+      setInvites(current => current.filter(item => item.id !== invite.id))
       if (openedUser?.uid === invite.userId) setOpenedUser(null)
       setMessage(`${memberName} was removed from your institute.`)
     } catch (reason) {
@@ -126,13 +193,13 @@ export function OrganisationUsers() {
     setChangingRole(invite.id)
     setMessage('')
     try {
-      const response = await fetch(`/api/organisation-members/${encodeURIComponent(invite.userId)}`, {
+      const response = await authenticatedFetch(user, '/api/memberships', {
         method: 'PATCH',
-        headers: { authorization: `Bearer ${await user.getIdToken()}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ memberRole: nextRole }),
+        body: JSON.stringify({ organizationId: invite.organisationId, userId: invite.userId, role: nextRole }),
       })
       const payload = await response.json().catch(() => ({})) as { error?: string }
       if (!response.ok) throw new Error(payload.error || 'Unable to update the institute role.')
+      setInvites(current => current.map(item => item.id === invite.id ? { ...item, memberRole: nextRole } : item))
       setMessage(nextRole === 'teacher' ? `${invite.userName || invite.userEmail} is now a teacher.` : `${invite.userName || invite.userEmail} is now a student.`)
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : 'Unable to update the institute role.')
@@ -154,7 +221,7 @@ export function OrganisationUsers() {
 }
 
 function JoinedUserCard({ account, rank, submissions, attendance, groups, open }: { account: UserProfile; rank: number; submissions: Submission[]; attendance?: { present: number; absent: number }; groups: Group[]; open: () => void }) {
-  const attempts = submissions.slice().sort((a, b) => (b.submittedAt?.toDate?.().getTime() || 0) - (a.submittedAt?.toDate?.().getTime() || 0))
+  const attempts = submissions.slice().sort((a, b) => (typeof b.submittedAt === 'string' ? new Date(b.submittedAt).getTime() : b.submittedAt?.toDate().getTime() || 0) - (typeof a.submittedAt === 'string' ? new Date(a.submittedAt).getTime() : a.submittedAt?.toDate().getTime() || 0))
   const average = attempts.length ? attempts.reduce((sum, item) => sum + score(item), 0) / attempts.length : 0
   const best = attempts.slice().sort((a, b) => score(b) - score(a))[0]
   const attendanceTotal = (attendance?.present || 0) + (attendance?.absent || 0)

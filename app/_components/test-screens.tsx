@@ -4,15 +4,14 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import Image from 'next/image'
 import { useRouter } from 'next/navigation'
-import { collection, deleteField, doc, getDoc, getDocs, onSnapshot, query, runTransaction, serverTimestamp, setDoc, updateDoc, where, writeBatch } from 'firebase/firestore'
-import { getDownloadURL, ref, uploadBytes } from 'firebase/storage'
-import { db, storage } from '@/lib/firebase'
+import { authenticatedFetch } from '@/lib/authenticated-fetch'
+import { uploadAuthorizedFile } from '@/lib/file-upload'
 import { useAuth } from './auth-context'
 import { ExamResolver } from './exam-resolver'
 import { MathText, MathTextEditor } from './math-components'
 import { SearchPicker } from './search-picker'
-import type { LearnerQuestion, MockTest, QuestionBankItem, QuestionContent, QuestionFormat, TestQuestion } from './test-types'
-import type { ExamCatalogEntry } from '@/lib/exam-catalog'
+import type { LearnerQuestion, MockTest, QuestionContent, QuestionFormat } from './test-types'
+import type { ExamCatalogEntry, ExamSelectionStatus } from '@/lib/exam-catalog'
 import { useTeacherOrganisations } from './use-teacher-organisations'
 
 type DraftQuestion = { key: string;
@@ -34,8 +33,6 @@ const questionFormat = (content: QuestionContent): QuestionFormat => content.for
 const blankDraft = (): DraftQuestion => ({ key: crypto.randomUUID(), content: blankContent(), marks: 1, revision: 1, isNew: true, format: 'plain' })
 const cleanContent = (content: QuestionContent, format: QuestionFormat): QuestionContent => ({ ...content, format, prompt: content.prompt.trim(), options: content.options.map((option) => option.trim()), optionImageUrls: (content.optionImageUrls || []).map((url) => url || '') })
 const validContent = (content: QuestionContent) => !!content.prompt && content.options.length === 4 && content.options.every(Boolean) && content.correctAnswer >= 0 && content.correctAnswer < content.options.length
-const categoryId = (name: string) => name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-
 function QuestionFields({ draft, onChange, uploadImage }: { draft: DraftQuestion;
 onChange: (update: Partial<DraftQuestion>) => void;
 uploadImage: (file: File, slot: string) => Promise<string> }) {
@@ -79,9 +76,11 @@ initialTest?: MockTest }) {
   const [categories, setCategories] = useState<Category[]>([])
   const [addingExam, setAddingExam] = useState(false)
   const [newExamName, setNewExamName] = useState('')
+  const [resolvingExam, setResolvingExam] = useState(false)
   const [questions, setQuestions] = useState<DraftQuestion[]>([])
   const [message, setMessage] = useState('')
   const [saving, setSaving] = useState(false)
+  const uploadedImagePaths = useRef(new Map<string, string>())
   const { organisations: teacherOrganisations, loading: teacherOrganisationsLoading } = useTeacherOrganisations(profile?.role === 'user' ? user : null)
   const isTeacher = profile?.role === 'user' && (
     initialTest
@@ -90,7 +89,7 @@ initialTest?: MockTest }) {
   )
   const allowed = profile?.role === 'admin' || profile?.role === 'organisation' || isTeacher
   const contentOrganisationId = initialTest?.organisationId
-    || (profile?.role === 'organisation' ? user?.uid || '' : organisationId)
+    || (profile?.role === 'organisation' ? profile.organizationId || '' : organisationId)
     || (teacherOrganisations.length === 1 ? teacherOrganisations[0].id : '')
   const contentVisibility = isTeacher && visibility === 'public' ? 'assigned' : visibility
   const marks = useMemo(() => questions.reduce((total, item) => total + Number(item.marks || 0), 0), [questions])
@@ -104,13 +103,22 @@ initialTest?: MockTest }) {
 
   useEffect(() => {
     if (!user) return
-    const stopExams = onSnapshot(collection(db, 'examCatalog'), (snapshot) => setExams(snapshot.docs.map((item) => ({ id: item.id, name: item.data().name as string, primaryAlias: typeof item.data().primaryAlias === 'string' && item.data().primaryAlias.trim() ? item.data().primaryAlias.trim() : item.data().name as string, aliases: Array.isArray(item.data().aliases) ? item.data().aliases.filter((value: unknown): value is string => typeof value === 'string') : [] })).filter((item) => item.name)), (reason) => setMessage(reason.message))
-    // Categories belong to the organisation that created them. The createdBy query
-    // also keeps categories created before organisationId was added available.
-    const stopCategories = onSnapshot(query(collection(db, 'categories'), where('createdBy', '==', user.uid)), (snapshot) => setCategories(snapshot.docs.map((item) => ({ id: item.id, name: item.data().name as string, examId: item.data().examId as string, organisationId: item.data().organisationId as string | undefined })).filter((item) => item.name && item.examId)), (reason) => setMessage(reason.message))
-    return () => { stopExams();
-stopCategories() }
-  }, [user])
+    const controller = new AbortController()
+    void Promise.all([
+      authenticatedFetch(user, '/api/exams?scope=catalog', { cache: 'no-store', signal: controller.signal }),
+      authenticatedFetch(user, `/api/categories${contentOrganisationId ? `?organizationId=${encodeURIComponent(contentOrganisationId)}` : ''}`, { cache: 'no-store', signal: controller.signal }),
+    ]).then(async ([examResponse, categoryResponse]) => {
+      const examBody = await examResponse.json()
+      const categoryBody = await categoryResponse.json()
+      if (!examResponse.ok) throw new Error(examBody.error || 'Unable to load exams.')
+      if (!categoryResponse.ok) throw new Error(categoryBody.error || 'Unable to load categories.')
+      setExams(examBody.items || [])
+      setCategories(categoryBody.items || [])
+    }).catch(reason => {
+      if (!controller.signal.aborted) setMessage(reason instanceof Error ? reason.message : 'Unable to load test options.')
+    })
+    return () => controller.abort()
+  }, [contentOrganisationId, user])
 
   useEffect(() => {
     void (async () => {
@@ -119,42 +127,16 @@ stopCategories() }
 return }
       if (!initialTest) return
       if (initialTest.questions) {
-        setQuestions(initialTest.questions.map((question) => ({ key: crypto.randomUUID(), content: question, marks: question.marks, revision: 1, isNew: true, format: questionFormat(question) })))
+        setQuestions(initialTest.questions.map((question) => ({
+          key: crypto.randomUUID(),
+          questionId: 'questionId' in question && typeof question.questionId === 'string' ? question.questionId : undefined,
+          content: question,
+          marks: question.marks,
+          revision: 1,
+          isNew: !('questionId' in question && question.questionId),
+          format: questionFormat(question),
+        })))
         return
-      }
-
-      try {
-        const result = await getDocs(collection(db, 'tests', testId, 'questions'))
-        const memberships = result.docs.map((item) => ({ id: item.id, ...item.data() }) as TestQuestion).sort((a, b) => a.position - b.position)
-        const sources = await Promise.all(memberships.map(membership => getDoc(doc(db, 'questions', membership.questionId))))
-        const existingIds = memberships.flatMap((membership, index) => sources[index].exists() ? [membership.questionId] : [])
-        let privateKeys: Record<string, { correctAnswer?: number }> = {}
-        if (existingIds.length && user) {
-          const response = await fetch('/api/question-keys', {
-            method: 'POST',
-            headers: { authorization: `Bearer ${await user.getIdToken()}`, 'content-type': 'application/json' },
-            body: JSON.stringify({ questionIds: existingIds }),
-          })
-          if (response.ok) privateKeys = ((await response.json()) as { keys?: typeof privateKeys }).keys || {}
-        }
-        const drafts = memberships.map((membership, index) => {
-          const source = sources[index]
-          const data = source.exists() ? source.data() as QuestionBankItem : null
-          const base = data ?? membership.snapshot ?? blankContent()
-          const content = { ...base, correctAnswer: privateKeys[membership.questionId]?.correctAnswer ?? base.correctAnswer ?? 0 }
-          return {
-            key: membership.id,
-            questionId: data ? membership.questionId : undefined,
-            content,
-            marks: membership.marks,
-            revision: data?.revision ?? membership.snapshot?.revision ?? 1,
-            isNew: !data,
-            format: questionFormat(content),
-          }
-        })
-        setQuestions(drafts)
-      } catch (reason) {
-        setMessage(reason instanceof Error ? reason.message : 'Unable to load questions.')
       }
     })()
   }, [initialTest, testId, user])
@@ -162,23 +144,23 @@ return }
   function updateQuestion(index: number, update: Partial<DraftQuestion>) { setQuestions((current) => current.map((item, i) => i === index ? { ...item, ...update } : item)) }
 
   async function uploadQuestionImage(file: File, questionKey: string, slot: string) {
+    void questionKey
+    void slot
     if (!user) throw new Error('Sign in before uploading an image.')
     if (!file.type.startsWith('image/')) throw new Error('Please select an image file.')
     if (file.size > 5 * 1024 * 1024) throw new Error('Images must be 5 MB or smaller.')
-    const extension = file.name.split('.').pop()?.replace(/[^a-zA-Z0-9]/g, '') || 'image'
     if (profile?.role !== 'admin' && !contentOrganisationId) throw new Error('Select an institute before uploading question images.')
-    const imagePath = profile?.role === 'admin'
-      ? `question-images/${user.uid}/${questionKey}/${slot}-${crypto.randomUUID()}.${extension}`
-      : `question-images/${contentOrganisationId}/${user.uid}/${questionKey}/${slot}-${crypto.randomUUID()}.${extension}`
-    const imageRef = ref(storage, imagePath)
-    await uploadBytes(imageRef, file, { contentType: file.type })
-    return getDownloadURL(imageRef)
+    const uploaded = await uploadAuthorizedFile(user, file, contentOrganisationId || null)
+    const response = await authenticatedFetch(user, `/api/files/${uploaded.fileId}/download`, { cache: 'no-store' })
+    const body = await response.json()
+    if (!response.ok) throw new Error(body.error || 'Unable to preview the uploaded image.')
+    uploadedImagePaths.current.set(body.url, uploaded.path)
+    return body.url as string
   }
 
   async function addCategory(categoryName: string) {
     const name = categoryName.trim()
-    const id = categoryId(name)
-    if (!name || !id || !user || !examId || (profile?.role !== 'admin' && !contentOrganisationId)) { setMessage('Select an institute and exam, then enter a valid category name.');
+    if (!name || !user || !examId || (profile?.role !== 'admin' && !contentOrganisationId)) { setMessage('Select an institute and exam, then enter a valid category name.');
 return }
     try {
       const ownedCategory = categories.find((item) => item.examId === examId && item.name.toLowerCase() === name.toLowerCase())
@@ -186,11 +168,43 @@ return }
         setCategoryIdValue(ownedCategory.id)
         return
       }
-      const categoryRef = doc(db, 'categories', `${user.uid}_${examId}_${id}`)
-      await setDoc(categoryRef, { name, examId, createdBy: user.uid, ...(profile?.role === 'admin' ? {} : { organisationId: contentOrganisationId }), createdAt: serverTimestamp() })
-      setCategoryIdValue(categoryRef.id)
+      const response = await authenticatedFetch(user, '/api/categories', {
+        method: 'POST',
+        body: JSON.stringify({ name, examId, organizationId: contentOrganisationId || null }),
+      })
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error || 'Unable to add category.')
+      setCategories(current => current.some(item => item.id === body.item.id) ? current : [...current, body.item])
+      setCategoryIdValue(body.item.id)
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : 'Unable to add category.')
+    }
+  }
+
+  function applyResolvedExam(exam: ExamCatalogEntry, status: ExamSelectionStatus) {
+    setExams(current => current.some(item => item.id === exam.id) ? current : [...current, exam])
+    setExamId(exam.id)
+    setCategoryIdValue('')
+    setAddingExam(false)
+    setMessage(status === 'created' ? `Created and selected ${exam.name}.` : `Selected ${exam.name}.`)
+  }
+
+  async function selectCatalogExam(exam: ExamCatalogEntry) {
+    if (!user) return
+    setResolvingExam(true)
+    setMessage('')
+    try {
+      const response = await authenticatedFetch(user, '/api/exams/resolve', {
+        method: 'POST',
+        body: JSON.stringify({ selectionId: exam.id }),
+      })
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error || 'Unable to select this exam.')
+      applyResolvedExam(body.exam as ExamCatalogEntry, 'selected')
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : 'Unable to select this exam.')
+    } finally {
+      setResolvingExam(false)
     }
   }
 
@@ -205,47 +219,37 @@ return }
     setSaving(true)
     setMessage('')
     try {
-      const testRef = testId ? doc(db, 'tests', testId) : doc(collection(db, 'tests'))
-      const batch = writeBatch(db)
-      const testData = {
-        title: title.trim(), exam: selectedExam.name, examAlias: selectedExam.primaryAlias, examId: selectedExam.id, category: selectedCategory.name, categoryId: selectedCategory.id, published: true, publishedAt: initialTest?.publishedAt || serverTimestamp(), description: description.trim(), durationMinutes: Number(duration) || 0,
-        questionCount: cleaned.length, totalMarks: marks, visibility: contentVisibility,
-        ...(contentVisibility !== 'public' ? { organisationId: contentOrganisationId } : testId ? { organisationId: deleteField() } : {}),
-        ...(testId ? { attemptLimit: deleteField() } : {}),
-        ...(initialTest?.questions ? { questions: deleteField() } : {}),
-        ...(testId ? {} : { createdBy: user.uid, deletedAt: null, createdAt: serverTimestamp(), schemaVersion: 2 }),
-      }
-      batch.set(testRef, testData, { merge: !!testId })
-
-      const existing = testId ? await getDocs(collection(testRef, 'questions')) : null
-      const retained = new Set(cleaned.filter((draft) => !draft.isNew).map((draft) => draft.key))
-      existing?.docs.filter((item) => !retained.has(item.id)).forEach((item) => batch.delete(item.ref))
-
-      const keyWrites: Array<{ questionId: string; kind: 'mcq'; correctAnswer: number }> = []
-      for (const [position, draft] of cleaned.entries()) {
-        const questionRef = draft.questionId ? doc(db, 'questions', draft.questionId) : doc(collection(db, 'questions'))
-        const { correctAnswer, ...publicContent } = draft.content
-        if (draft.questionId) {
-          batch.update(questionRef, { ...publicContent, correctAnswer: deleteField(), revision: draft.revision + 1, updatedAt: serverTimestamp() })
-        } else {
-          const questionVisibility = contentVisibility === 'public' ? 'public' : 'private'
-          batch.set(questionRef, { ...publicContent, kind: 'mcq', createdBy: user.uid, visibility: questionVisibility, ...(questionVisibility === 'private' ? { organisationId: contentOrganisationId } : {}), revision: 1, archivedAt: null, createdAt: serverTimestamp(), updatedAt: serverTimestamp() })
-        }
-        keyWrites.push({ questionId: questionRef.id, kind: 'mcq', correctAnswer })
-        const membershipRef = draft.isNew ? doc(collection(testRef, 'questions')) : doc(testRef, 'questions', draft.key)
-        batch.set(membershipRef, { questionId: questionRef.id, position, marks: draft.marks, mode: 'linked' })
-      }
-
-      await batch.commit()
-      const keyResponse = await fetch('/api/question-keys', {
-        method: 'PUT',
-        headers: { authorization: `Bearer ${await user.getIdToken()}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ keys: keyWrites }),
+      const response = await authenticatedFetch(user, '/api/tests', {
+        method: testId ? 'PUT' : 'POST',
+        body: JSON.stringify({
+          ...(testId ? { id: testId } : {}),
+          organizationId: contentOrganisationId || null,
+          examId: selectedExam.id,
+          categoryId: selectedCategory.id,
+          title: title.trim(),
+          description: description.trim(),
+          durationMinutes: Number(duration) || 0,
+          visibility: contentVisibility,
+          published: true,
+          questions: cleaned.map(draft => ({
+            questionId: draft.questionId,
+            kind: 'mcq',
+            prompt: draft.content.prompt,
+            options: draft.content.options,
+            correctAnswer: draft.content.correctAnswer,
+            marks: draft.marks,
+            format: draft.format,
+            promptImagePath: draft.content.promptImageUrl
+              ? uploadedImagePaths.current.get(draft.content.promptImageUrl) || draft.content.promptImagePath || null
+              : null,
+            optionImagePaths: (draft.content.optionImageUrls || []).map((url, index) => (
+              url ? uploadedImagePaths.current.get(url) || draft.content.optionImagePaths?.[index] || '' : ''
+            )),
+          })),
+        }),
       })
-      if (!keyResponse.ok) {
-        const payload = await keyResponse.json().catch(() => ({})) as { error?: string }
-        throw new Error(payload.error || 'The test was saved, but its private answer keys could not be updated.')
-      }
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error || 'Unable to save this test.')
       router.push(testId ? `/tests/${testId}` : '/tests')
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : 'Unable to save this test.')
@@ -261,7 +265,7 @@ return }
       <div className="rounded-2xl bg-white p-6 shadow-sm">
         {isTeacher && <label className="mb-4 block text-sm font-bold">Institute<select value={contentOrganisationId} disabled={Boolean(initialTest)} onChange={event => { setOrganisationId(event.target.value); setCategoryIdValue('') }} required className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 font-normal disabled:bg-slate-100"><option value="">Select institute</option>{teacherOrganisations.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}
         <label className="block text-sm font-bold">Test title<input value={title} onChange={(event) => setTitle(event.target.value)} required className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2.5" /></label>
-        <div className="mt-4"><label className="block text-sm font-bold">Exam<span className="mt-2 block font-normal"><SearchPicker value={examId} options={examOptions.map((item) => ({ id: item.id, label: item.name, detail: [...new Set([item.primaryAlias, ...item.aliases])].filter(alias => alias && alias !== item.name).join(', ') || undefined }))} onChange={(option) => { setExamId(option.id); setCategoryIdValue(''); setAddingExam(false) }} onCreate={(query) => { setNewExamName(query); setAddingExam(true) }} createLabel="Add exam" placeholder="Search exams" /></span></label>{addingExam && <div className="mt-3 rounded-xl border border-indigo-100 bg-indigo-50/50 p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><p className="text-sm font-bold text-slate-900">Add a new exam</p><p className="mt-1 text-xs text-slate-500">Existing matches will be shown before you can create it.</p></div><button type="button" onClick={() => setAddingExam(false)} className="text-sm font-bold text-indigo-700">Cancel</button></div><ExamResolver key={newExamName} initialName={newExamName} autoFocus onResolved={(exam, status) => { setExamId(exam.id); setCategoryIdValue(''); setAddingExam(false); setMessage(status === 'created' ? `Created and selected ${exam.name}.` : `Selected ${exam.name}.`) }} /></div>}</div>
+        <div className="mt-4"><label className="block text-sm font-bold">Exam<span className="mt-2 block font-normal"><SearchPicker value={examId} options={examOptions.map((item) => ({ id: item.id, label: item.name, detail: [...new Set([item.primaryAlias, ...item.aliases])].filter(alias => alias && alias !== item.name).join(', ') || undefined }))} onChange={(option) => { const exam = exams.find(item => item.id === option.id); if (exam) void selectCatalogExam(exam) }} onCreate={(query) => { setNewExamName(query); setAddingExam(true) }} createLabel="Create exam" placeholder="Search the exam catalog" disabled={resolvingExam} /></span></label>{addingExam && <div className="mt-3 rounded-xl border border-indigo-100 bg-indigo-50/50 p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><p className="text-sm font-bold text-slate-900">Create a new exam</p><p className="mt-1 text-xs text-slate-500">Catalog matches are checked before a new exam can be created.</p></div><button type="button" onClick={() => setAddingExam(false)} className="text-sm font-bold text-indigo-700">Cancel</button></div><ExamResolver key={newExamName} initialName={newExamName} autoFocus autoResolveInitialName onResolved={applyResolvedExam} /></div>}</div>
         <div className="mt-4"><label className="block text-sm font-bold">Category<span className="mt-2 block font-normal"><SearchPicker value={categoryIdValue} options={categoryOptions.map((item) => ({ id: item.id, label: item.name }))} onChange={(option) => setCategoryIdValue(option.id)} onCreate={(query) => void addCategory(query)} createLabel="Create category" placeholder={examId ? 'Search or create a category' : 'Select an exam first'} disabled={!examId} /></span></label></div>
         <label className="mt-4 block text-sm font-bold">Description<textarea value={description} onChange={(event) => setDescription(event.target.value)} className="mt-2 min-h-20 w-full rounded-lg border border-slate-200 px-3 py-2.5" /></label>
         <label className="mt-4 block max-w-48 text-sm font-bold">Duration (minutes)<input value={duration} onChange={(event) => setDuration(Number(event.target.value))} type="number" min="0" className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2.5" /></label>
@@ -288,11 +292,22 @@ const router = useRouter();
 const [test, setTest] = useState<MockTest | null>(null);
 const [message, setMessage] = useState('');
 const [deleting, setDeleting] = useState(false);
-useEffect(() => { getDoc(doc(db, 'tests', id)).then((result) => setTest(result.exists() ? ({ id: result.id, ...result.data() } as MockTest) : null)).catch((reason) => setMessage(reason.message)) }, [id]);
-const canManage = !!test && (profile?.role === 'admin' || ((profile?.role === 'organisation' || (profile?.role === 'user' && teacherOrganisations.some(item => item.id === test.organisationId))) && test.createdBy === user?.uid));
+useEffect(() => {
+  if (!user) return
+  authenticatedFetch(user, `/api/tests?id=${encodeURIComponent(id)}&edit=1`, { cache: 'no-store' })
+    .then(async response => {
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error || 'Unable to load this test.')
+      setTest(body.item)
+    })
+    .catch(reason => setMessage(reason instanceof Error ? reason.message : 'Unable to load this test.'))
+}, [id, user]);
+const canManage = !!test && (profile?.role === 'admin' || test.createdBy === user?.uid || (profile?.role === 'user' && teacherOrganisations.some(item => item.id === test.organisationId)));
 async function softDelete() { if (!test || !user || !confirm('Soft-delete this test?')) return;
 setDeleting(true);
-try { await updateDoc(doc(db, 'tests', id), { deletedAt: serverTimestamp(), deletedBy: user.uid });
+try {
+const response = await authenticatedFetch(user, '/api/tests', { method: 'PATCH', body: JSON.stringify({ id, deleted: true }) });
+if (!response.ok) throw new Error((await response.json()).error || 'Unable to delete this test.');
 router.push('/tests') } catch (reason) { setMessage(reason instanceof Error ? reason.message : 'Unable to delete this test.') } finally { setDeleting(false) } } if (!test || teacherOrganisationsLoading) return <p className="text-slate-500">Loading test…</p>;
 if (!canManage) return <section><h1 className="text-3xl font-black">Access denied</h1></section>;
 if (test.origin === 'ai_generated') return <section className="mx-auto max-w-3xl"><Link href={`/tests/${id}`} className="text-sm font-bold text-indigo-600">← Back to test</Link><div className="mt-6 rounded-2xl border border-indigo-200 bg-white p-7"><h1 className="text-3xl font-black">AI-generated test</h1><p className="mt-3 text-slate-600">This published test uses private answer keys and may contain short-answer rubrics. Its approved content is immutable; soft-delete it from Manage tests or create a new AI draft to replace it.</p><Link href="/manage/tests/generate" className="mt-6 inline-block rounded-xl bg-indigo-600 px-5 py-3 font-bold text-white">Open AI generator</Link></div></section>;
@@ -355,15 +370,9 @@ void (async () => {
 })()
 return () => controller.abort() }, [id, requestedAssignmentBatchId, user]);
 return { test, questions, assignment, status, loading, error } }
-function useAttemptCount(testId: string, userId?: string) { const [count, setCount] = useState(0);
-const [privateCount, setPrivateCount] = useState(0);
-const [ready, setReady] = useState(false);
-useEffect(() => { if (!userId) return;
-return onSnapshot(query(collection(db, 'submissions'), where('testId', '==', testId), where('userId', '==', userId)), snapshot => { setCount(snapshot.size);
-setPrivateCount(snapshot.docs.filter(item => item.data().testVisibility === 'private').length);
-setReady(true) }, () => setReady(true)) }, [testId, userId]);
-return { count, privateCount, ready } }
-export function TakeTest({ id, assignmentBatchId }: { id: string; assignmentBatchId?: string }) { const { user, profile, isImpersonating } = useAuth();
+function useAttemptCount(_testId: string, userId?: string) {
+return { count: 0, privateCount: 0, ready: Boolean(userId) } }
+export function TakeTest({ id, assignmentBatchId }: { id: string; assignmentBatchId?: string }) { const { user, isImpersonating } = useAuth();
 const { test, questions, assignment, status: windowStatus, loading, error } = useTestSession(id, assignmentBatchId, user || undefined);
 const { ready: attemptsReady } = useAttemptCount(id, user?.uid);
 const router = useRouter();
@@ -390,38 +399,13 @@ if (!test) return <section><h1 className="text-3xl font-black">Test unavailable<
 const isAssignedTest = test.visibility === 'assigned';
 const requiresSecureMode = test.visibility !== 'public';
 if (isAssignedTest && !assignment) return <TestAccessBlocked title="Assignment required" message="This test can only be opened from an assignment created for you." />;
-const assignmentUserName = profile?.name || user.displayName || profile?.email || user.email || 'Student';
 const markAssignmentTaskStarted = async () => {
   if (!assignment?.linkedTaskId) return
-  await runTransaction(db, async transaction => {
-    const taskRef = doc(db, 'tasks', assignment.linkedTaskId!)
-    const assigneeRef = doc(db, 'tasks', assignment.linkedTaskId!, 'assignees', user.uid)
-    const taskSnapshot = await transaction.get(taskRef)
-    const assigneeSnapshot = await transaction.get(assigneeRef)
-    if (!taskSnapshot.exists()) return
-    const taskData = taskSnapshot.data() as { assignedUserIds?: string[]; isClosed?: boolean; sourceType?: string; linkedAssignmentBatchId?: string }
-    if (taskData.isClosed || taskData.sourceType !== 'assignment' || taskData.linkedAssignmentBatchId !== assignment.assignmentBatchId || !taskData.assignedUserIds?.includes(user.uid)) return
-    const currentStatus = assigneeSnapshot.exists() ? assigneeSnapshot.data().status as string : 'todo'
-    if (currentStatus === 'done' || currentStatus === 'closed' || currentStatus === 'in_progress') return
-    transaction.set(assigneeRef, {
-      userId: user.uid,
-      userName: assignmentUserName,
-      userEmail: profile?.email || user.email || '',
-      status: 'in_progress',
-      updatedAt: serverTimestamp(),
-      updatedBy: user.uid,
-      updatedByName: assignmentUserName,
-    }, { merge: true })
-    transaction.update(taskRef, {
-      updatedAt: serverTimestamp(),
-      lastStatusAt: serverTimestamp(),
-      lastStatus: 'in_progress',
-      lastStatusUserId: user.uid,
-      lastStatusUserName: assignmentUserName,
-      lastStatusUpdatedBy: user.uid,
-      lastStatusUpdatedByName: assignmentUserName,
-    })
+  const response = await authenticatedFetch(user, '/api/tasks', {
+    method: 'PATCH',
+    body: JSON.stringify({ action: 'status', taskId: assignment.linkedTaskId, status: 'in_progress' }),
   })
+  if (!response.ok) throw new Error((await response.json()).error || 'Unable to start the linked task.')
 };
 const submit = async (automatic?: { reason: 'time_expired' | 'fullscreen_exited' }) => { if (!user || submittingRef.current) return;
 submittingRef.current = true;
@@ -439,19 +423,17 @@ try {
     body: JSON.stringify({
       testId: test.id,
       ...(assignment?.assignmentBatchId ? { assignmentBatchId: assignment.assignmentBatchId } : {}),
-      responses: questions.map((_, questionIndex) => ({
-        questionIndex,
-        answer: answers[questionIndex] ?? null,
-      })),
+      answers: questions.map((_, questionIndex) => answers[questionIndex] ?? null),
+      autoSubmitted: Boolean(autoSubmitReason),
       ...(autoSubmitReason ? { autoSubmitReason } : {}),
     }),
   })
-  const payload = await response.json().catch(() => ({})) as { submissionId?: string; error?: string }
-  if (!response.ok || !payload.submissionId) throw new Error(payload.error || 'Unable to save your submission.')
+  const payload = await response.json().catch(() => ({})) as { id?: string; error?: string }
+  if (!response.ok || !payload.id) throw new Error(payload.error || 'Unable to save your submission.')
   try { window.localStorage.removeItem(testTimerKey(test.id, user.uid, assignment?.assignmentBatchId)) } catch { /* Submission is already saved. */ }
   allowedFullscreenExit.current = true;
   if (document.fullscreenElement) { try { await document.exitFullscreen() } catch { /* Navigation can still complete. */ } }
-  router.push(`/tests/${id}/result?submission=${encodeURIComponent(payload.submissionId)}`)
+  router.push(`/tests/${id}/result?submission=${encodeURIComponent(payload.id)}`)
 } catch (reason) {
   setSubmitError(reason instanceof Error ? reason.message : 'Unable to save your submission. Please try again.')
 } finally {
@@ -559,4 +541,3 @@ const pending = result.gradingStatus === 'pending';
 const displayedScore = pending ? result.mcqScore || 0 : result.score || 0;
 const displayedTotal = pending ? result.mcqMarks || 0 : result.totalMarks;
 return <section className="mx-auto max-w-2xl text-center"><div className="rounded-3xl bg-white p-10 shadow-sm"><p className="text-sm font-bold tracking-widest text-indigo-600">TEST COMPLETE</p><h1 className="mt-3 text-3xl font-black">{pending ? 'MCQ subtotal' : 'Here’s your score'}</h1><div className="mx-auto mt-8 grid h-44 w-44 place-items-center rounded-full border-[12px] border-indigo-100 text-indigo-600"><div><strong className="text-5xl font-black">{displayedScore}</strong><span className="text-lg font-bold">/{displayedTotal}</span></div></div>{pending ? <p className="mt-7 rounded-xl bg-amber-50 p-4 text-amber-800">Your short answers are pending organisation review. <b>{result.pendingMarks || 0} marks</b> will be added after grading.</p> : <p className="mt-7 text-lg text-slate-600">You answered <b className="text-slate-900">{result.correctAnswers} of {result.questionCount}</b> MCQs correctly.</p>}<div className="mt-8 flex flex-wrap justify-center gap-3"><Link href="/submissions" className="rounded-xl border border-indigo-200 px-6 py-3 font-bold text-indigo-700">View submission</Link><Link href="/tests" className="rounded-xl bg-indigo-600 px-6 py-3 font-bold text-white">Back to test library</Link></div></div></section> }
-

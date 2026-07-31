@@ -2,23 +2,17 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { collection, doc, getDoc, getDocs, onSnapshot, query, where } from 'firebase/firestore'
-import { db } from '@/lib/firebase'
-import { isAssignmentWindowOpen } from '@/lib/assignment-window'
-import { assignmentInstanceId } from '@/lib/assignment-instance'
-import { useAuth, type UserProfile } from './auth-context'
+import { authenticatedFetch } from '@/lib/authenticated-fetch'
+import { useAuth } from './auth-context'
 import { SearchPicker } from './search-picker'
 import { TestDashboardModal } from './exam-dashboard'
 import { paginate, Pagination } from './pagination'
 import type { MockTest } from './test-types'
-import { memberRole, type MemberRole } from '@/lib/membership'
 
-type Invite = { organisationId: string; status: 'pending' | 'accepted' | 'declined'; memberRole?: MemberRole }
 type LibraryTest = MockTest & { assignmentBatchId?: string; assignmentName?: string; assignmentAttemptsUsed?: number; assignmentMaxAttempts?: number; assignmentStartAt?: { toDate: () => Date }; assignmentDeadline?: { toDate: () => Date } }
-type UserAssignment = { assignmentBatchId?: string; assignmentName?: string; testId: string; userId: string; attemptsUsed?: number; maxAttempts?: number; startAt?: { toDate: () => Date }; deadline: { toDate: () => Date } }
 
 const categoryName = (test: MockTest) => test.category?.trim() || 'Uncategorized'
-const createdAt = (test: MockTest) => test.createdAt?.toDate().getTime() || 0
+const createdAt = (test: MockTest) => !test.createdAt ? 0 : typeof test.createdAt === 'string' ? new Date(test.createdAt).getTime() : test.createdAt.toDate().getTime()
 const byNewest = <T extends MockTest,>(tests: T[]) => [...tests].sort((a, b) => createdAt(b) - createdAt(a) || b.id.localeCompare(a.id))
 const pageSize = 8
 const count = (test: MockTest) => ({
@@ -30,13 +24,11 @@ export function TestLibrary() {
   const { user, profile } = useAuth()
   const role = profile?.role
   const [teacherMember, setTeacherMember] = useState(false)
-  const canManage = role === 'admin' || role === 'organisation' || teacherMember
+  const canManage = role === 'admin' || role === 'organisation' || profile?.membershipRole === 'teacher' || teacherMember
   const [publicTests, setPublicTests] = useState<MockTest[]>([])
   const [privateTests, setPrivateTests] = useState<MockTest[]>([])
   const [assignedTests, setAssignedTests] = useState<LibraryTest[]>([])
-  const [userAssignments, setUserAssignments] = useState<UserAssignment[]>([])
-  const [organisationIds, setOrganisationIds] = useState<string[]>([])
-  const [teacherOrganisationIds, setTeacherOrganisationIds] = useState<string[]>([])
+  const [memberOrganisationIds, setMemberOrganisationIds] = useState<string[]>([])
   const [organisationNames, setOrganisationNames] = useState<Record<string, string>>({})
   const [exam, setExam] = useState('')
   const [category, setCategory] = useState('')
@@ -47,14 +39,13 @@ export function TestLibrary() {
   const [openedTest, setOpenedTest] = useState<MockTest | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [now, setNow] = useState(() => Date.now())
   const allTests = useMemo(() => [...publicTests, ...privateTests, ...assignedTests], [assignedTests, privateTests, publicTests])
   const organisationOptions = useMemo(() => {
     const ids = role === 'user'
-      ? organisationIds
-      : role === 'admin' ? Object.keys(organisationNames) : user ? [user.uid] : []
+      ? memberOrganisationIds
+      : role === 'admin' ? Object.keys(organisationNames) : profile?.organizationId ? [profile.organizationId] : []
     return ids.map(id => ({ id, label: organisationNames[id] || id })).sort((a, b) => a.label.localeCompare(b.label))
-  }, [organisationIds, organisationNames, role, user])
+  }, [memberOrganisationIds, organisationNames, profile, role])
   const exams = useMemo(
     () => [...new Map(allTests.filter(test => test.exam).map(test => [
       test.examId || `legacy:${test.exam}`,
@@ -90,156 +81,76 @@ export function TestLibrary() {
   const pagedTests = paginate(visibleTests, page, pageSize)
 
   useEffect(() => {
-    if (!user) return
-    return onSnapshot(
-      query(collection(db, 'tests'), where('visibility', '==', 'public'), where('deletedAt', '==', null)),
-      snapshot => {
-        setPublicTests(byNewest(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as MockTest)))
-        setLoading(false)
-      },
-      reason => {
-        setError(reason.message)
-        setLoading(false)
-      },
-    )
-  }, [user])
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 60_000)
-    return () => window.clearInterval(timer)
-  }, [])
-
-  useEffect(() => {
-    if (!user || role !== 'user') return
-    return onSnapshot(
-      query(collection(db, 'organisationInvites'), where('userId', '==', user.uid)),
-      snapshot => {
-        const invites = snapshot.docs.map(item => item.data() as Invite).filter(item => item.status === 'accepted')
-        setOrganisationIds(invites.map(item => item.organisationId))
-        const teacherIds = invites
-          .filter(item => memberRole(item.memberRole) === 'teacher')
-          .map(item => item.organisationId)
-        setTeacherOrganisationIds(teacherIds)
-        setTeacherMember(teacherIds.length > 0)
-      },
-      reason => setError(reason.message),
-    )
-  }, [role, user])
-
-  useEffect(() => {
     if (!user || !role) return
     let active = true
-    const loadOrganisations = async () => {
-      if (role === 'organisation') {
-        setOrganisationNames({ [user.uid]: profile?.name || profile?.email || user.email || 'Your institute' })
-        return
+    const testsUrl = canManage ? '/api/tests?owned=1' : '/api/tests'
+    void Promise.all([
+      authenticatedFetch(user, testsUrl, { cache: 'no-store' }),
+      authenticatedFetch(user, '/api/assignments', { cache: 'no-store' }),
+      authenticatedFetch(user, '/api/organizations', { cache: 'no-store' }),
+    ]).then(async ([testResponse, assignmentResponse, organizationResponse]) => {
+      const [testData, assignmentData, organizationData] = await Promise.all([
+        testResponse.json(),
+        assignmentResponse.json(),
+        organizationResponse.json(),
+      ])
+      if (!testResponse.ok) throw new Error(testData.error || 'Unable to load tests.')
+      if (!assignmentResponse.ok) throw new Error(assignmentData.error || 'Unable to load assignments.')
+      if (!organizationResponse.ok) throw new Error(organizationData.error || 'Unable to load institutes.')
+      if (!active) return
+
+      const available = ((testData.items || []) as MockTest[]).map(test => ({
+        ...test,
+        createdAt: typeof test.createdAt === 'string' ? { toDate: () => new Date(test.createdAt as string) } : test.createdAt,
+      }))
+      const memberships = (organizationData.memberships || []) as Array<{ organizationId: string; role: string }>
+      const organizationItems = (organizationData.items || []) as Array<{ id: string; name: string }>
+      const joinedIds = memberships.map(item => item.organizationId)
+      const teacherIds = memberships.filter(item => item.role === 'teacher' || item.role === 'owner').map(item => item.organizationId)
+      setMemberOrganisationIds(joinedIds)
+      setTeacherMember(teacherIds.length > 0 || profile?.membershipRole === 'teacher')
+      setOrganisationNames(Object.fromEntries(organizationItems.map(item => [item.id, item.name])))
+
+      setPublicTests(byNewest(available.filter(test => test.visibility === 'public')))
+      setPrivateTests(byNewest(available.filter(test => test.visibility === 'private')))
+
+      if (canManage) {
+        setAssignedTests(byNewest(available.filter(test => test.visibility === 'assigned') as LibraryTest[]))
+      } else {
+        const assignments = (assignmentData.assignments || []) as Array<{
+          id: string
+          name: string
+          testId: string
+          maxAttempts?: number
+          startAt?: string
+          deadline: string
+          recipients?: Array<{ userId: string; attemptsUsed?: number }>
+        }>
+        setAssignedTests(byNewest(assignments.flatMap(assignment => {
+          const recipient = assignment.recipients?.find(item => item.userId === user.uid)
+          const test = available.find(item => item.id === assignment.testId)
+          if (!recipient || !test) return []
+          return [{
+            ...test,
+            assignmentBatchId: assignment.id,
+            assignmentName: assignment.name,
+            assignmentAttemptsUsed: recipient.attemptsUsed || 0,
+            assignmentMaxAttempts: assignment.maxAttempts || 1,
+            assignmentStartAt: assignment.startAt ? { toDate: () => new Date(assignment.startAt!) } : undefined,
+            assignmentDeadline: { toDate: () => new Date(assignment.deadline) },
+          } satisfies LibraryTest]
+        })))
       }
-      const profiles = role === 'admin'
-        ? (await getDocs(query(collection(db, 'users'), where('role', '==', 'organisation')))).docs.map(item => ({ uid: item.id, ...item.data() }) as UserProfile)
-        : (await Promise.all(organisationIds.map(async id => {
-            const result = await getDoc(doc(db, 'users', id))
-            return result.exists() ? ({ uid: result.id, ...result.data() } as UserProfile) : null
-          }))).filter((item): item is UserProfile => item !== null)
-      if (active) setOrganisationNames(Object.fromEntries(profiles.map(item => [item.uid, item.name || item.email])))
-    }
-    void loadOrganisations().catch(reason => setError(reason instanceof Error ? reason.message : 'Unable to load institutes.'))
-    return () => { active = false }
-  }, [organisationIds, profile?.email, profile?.name, role, user])
-
-  useEffect(() => {
-    if (role === 'admin') {
-      getDocs(query(collection(db, 'tests'), where('visibility', '==', 'private'), where('deletedAt', '==', null)))
-        .then(snapshot => setPrivateTests(byNewest(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as MockTest))))
-        .catch(reason => setError(reason.message))
-      return
-    }
-    if (role === 'organisation' && user) {
-      getDocs(query(collection(db, 'tests'), where('visibility', '==', 'private'), where('organisationId', '==', user.uid), where('deletedAt', '==', null)))
-        .then(snapshot => setPrivateTests(byNewest(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as MockTest))))
-        .catch(reason => setError(reason.message))
-      return
-    }
-    if (organisationIds.length) {
-      Promise.all(organisationIds.map(id => getDocs(query(
-        collection(db, 'tests'),
-        where('visibility', '==', 'private'),
-        where('organisationId', '==', id),
-        where('deletedAt', '==', null),
-      ))))
-        .then(snapshots => setPrivateTests(byNewest(snapshots.flatMap(snapshot => snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as MockTest)))))
-        .catch(reason => setError(reason.message))
-    }
-  }, [organisationIds, role, user])
-
-  useEffect(() => {
-    if (!user) return
-    if (role === 'admin') {
-      return onSnapshot(query(collection(db, 'tests'), where('visibility', '==', 'assigned'), where('deletedAt', '==', null)), snapshot => setAssignedTests(byNewest(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as LibraryTest))), reason => setError(reason.message))
-    }
-    if (role === 'organisation') {
-      return onSnapshot(query(collection(db, 'tests'), where('visibility', '==', 'assigned'), where('createdBy', '==', user.uid), where('deletedAt', '==', null)), snapshot => setAssignedTests(byNewest(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as LibraryTest))), reason => setError(reason.message))
-    }
-    if (role === 'user' && teacherMember) {
-      let active = true
-      Promise.all(teacherOrganisationIds.map(id => getDocs(query(
-        collection(db, 'tests'),
-        where('organisationId', '==', id),
-        where('visibility', '==', 'assigned'),
-        where('deletedAt', '==', null),
-      ))))
-        .then(snapshots => {
-          if (active) setAssignedTests(byNewest(snapshots.flatMap(snapshot => (
-            snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as LibraryTest)
-          ))))
-        })
-        .catch(reason => {
-          if (active) setError(reason.message)
-        })
-      return () => { active = false }
-    }
-    if (role !== 'user') return
-    void user.getIdToken().then(token => fetch('/api/test-session?list=assignments', {
-      headers: { authorization: `Bearer ${token}` },
-    })).catch(() => undefined)
-    return onSnapshot(
-      query(collection(db, 'testAssignments'), where('userId', '==', user.uid)),
-      snapshot => setUserAssignments(snapshot.docs
-        .map(item => ({ id: item.id, ...item.data() }) as UserAssignment & { id: string })
-        .filter(item => !!item.assignmentBatchId && item.id === assignmentInstanceId(item.assignmentBatchId, user.uid))),
-      reason => setError(reason.message),
-    )
-  }, [role, teacherMember, teacherOrganisationIds, user])
-
-  useEffect(() => {
-    if (!user || role !== 'user') return
-    let active = true
-    const openAssignments = userAssignments.filter(assignment => isAssignmentWindowOpen(assignment, now))
-    Promise.all(openAssignments.map(async assignment => {
-      try {
-        const queryString = new URLSearchParams({ testId: assignment.testId })
-        if (assignment.assignmentBatchId) queryString.set('assignment', assignment.assignmentBatchId)
-        const response = await fetch(`/api/test-session?${queryString}`, {
-          headers: { authorization: `Bearer ${await user.getIdToken()}` },
-        })
-        const payload = await response.json().catch(() => ({})) as { test?: MockTest; error?: string }
-        if (!response.ok || !payload.test) {
-          if (response.status === 403) return null
-          throw new Error(payload.error || 'Unable to load assigned test.')
-        }
-        return { ...payload.test, assignmentBatchId: assignment.assignmentBatchId, assignmentName: assignment.assignmentName, assignmentAttemptsUsed: assignment.attemptsUsed || 0, assignmentMaxAttempts: assignment.maxAttempts || 1, assignmentStartAt: assignment.startAt, assignmentDeadline: assignment.deadline } as LibraryTest
-      } catch (reason) {
-        if ((reason as { code?: string }).code === 'permission-denied') return null
-        throw reason
+      setLoading(false)
+      setError('')
+    }).catch(reason => {
+      if (active) {
+        setError(reason instanceof Error ? reason.message : 'Unable to load tests.')
+        setLoading(false)
       }
-    }))
-      .then(items => {
-        if (active) setAssignedTests(byNewest(items.filter((item): item is LibraryTest => item !== null)))
-      })
-      .catch(reason => {
-        if (active) setError(reason instanceof Error ? reason.message : 'Unable to load assigned tests.')
-      })
+    })
     return () => { active = false }
-  }, [now, role, user, userAssignments])
+  }, [canManage, profile?.membershipRole, role, user])
 
   return <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7">
     <header className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-indigo-50/80 via-white to-white p-1">

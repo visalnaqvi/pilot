@@ -2,8 +2,6 @@
 
 import { getApp, getApps, initializeApp } from 'firebase/app'
 import { getAuth } from 'firebase/auth'
-import { getFirestore } from 'firebase/firestore'
-import { getStorage } from 'firebase/storage'
 
 const firebaseConfig = {
   apiKey: 'AIzaSyDHiQfgBCK-Xkfz0xHMSI2zOKE1DI4uauQ',
@@ -17,5 +15,3 @@ const firebaseConfig = {
 // Reuse the existing app during development hot reloads.
 export const firebaseApp = getApps().length ? getApp() : initializeApp(firebaseConfig)
 export const auth = getAuth(firebaseApp)
-export const db = getFirestore(firebaseApp)
-export const storage = getStorage(firebaseApp)

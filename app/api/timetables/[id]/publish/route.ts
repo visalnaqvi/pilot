@@ -1,114 +1,62 @@
-import { createHash } from 'node:crypto'
-import { errorResponse, requireRole } from '@/lib/admin-api'
-import { adminDb, Timestamp } from '@/lib/firebase-admin'
-import { resolveOrganisationTaskAudience } from '@/lib/task-api'
-import { ensureTimetableAgendaJobs } from '@/lib/timetable-email-jobs'
-import { localDateKey, type TimetableInput } from '@/lib/timetable'
-import { timetableInputSchema } from '@/lib/timetable-schema'
-import { assertAcceptedTeachers } from '@/lib/attendance-api'
-
-export const runtime = 'nodejs'
-export const maxDuration = 60
-
-function inputFromDraft(data: FirebaseFirestore.DocumentData): TimetableInput {
-  return {
-    name: data.name,
-    effectiveFrom: data.effectiveFrom,
-    effectiveTo: data.effectiveTo,
-    selectedUserIds: data.selectedUserIds || [],
-    selectedGroupIds: data.selectedGroupIds || [],
-    entries: data.entries || [],
-  }
-}
-
-function contentHash(input: TimetableInput) {
-  return createHash('sha256').update(JSON.stringify(input)).digest('hex')
-}
+import { and, desc, eq, inArray } from 'drizzle-orm'
+import {
+  emailJobs,
+  notifications,
+  organizationGroupMembers,
+  timetables,
+  timetableVersionGroups,
+  timetableVersions,
+  timetableVersionUsers,
+} from '@/db/schema'
+import { authenticateRequest, errorResponse } from '@/lib/admin-api'
+import { database } from '@/lib/db'
+import { canAdministerOrganization } from '@/lib/services/access'
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
-  const auth = await requireRole(request, ['organisation'])
+  const auth = await authenticateRequest(request)
   if ('error' in auth) return auth.error
   try {
     const { id } = await context.params
-    const draftReference = adminDb.collection('timetableDrafts').doc(id)
-    const publishedReference = adminDb.collection('timetables').doc(id)
-    const initialDraft = await draftReference.get()
-    if (!initialDraft.exists) return Response.json({ error: 'Timetable draft not found.' }, { status: 404 })
-    if (initialDraft.data()?.organisationId !== auth.user.uid) {
-      return Response.json({ error: 'You cannot publish this timetable.' }, { status: 403 })
-    }
-    const input = inputFromDraft(initialDraft.data()!)
-    const parsed = timetableInputSchema.safeParse(input)
-    if (!parsed.success) {
-      return Response.json({ error: parsed.error.issues[0]?.message || 'Invalid timetable details.', issues: parsed.error.issues }, { status: 400 })
-    }
-    const timeZone = process.env.APP_TIME_ZONE || 'Asia/Kolkata'
-    if (parsed.data.effectiveTo < localDateKey(new Date(), timeZone)) {
-      return Response.json({ error: 'The timetable end date must not be in the past.' }, { status: 400 })
-    }
-    const audience = await resolveOrganisationTaskAudience({
-      organisationId: auth.user.uid,
-      selectedUserIds: parsed.data.selectedUserIds,
-      selectedGroupIds: parsed.data.selectedGroupIds,
-    })
-    const teacherUserIds = [...new Set(parsed.data.entries.flatMap(entry => entry.teacherUserId ? [entry.teacherUserId] : []))]
-    await assertAcceptedTeachers(auth.user.uid, teacherUserIds)
-    const expectedHash = contentHash(parsed.data)
-    const result = await adminDb.runTransaction(async transaction => {
-      const draft = await transaction.get(draftReference)
-      const published = await transaction.get(publishedReference)
-      if (!draft.exists || draft.data()?.organisationId !== auth.user.uid) {
-        throw new Error('The timetable draft changed or is no longer available.')
-      }
-      const currentInput = timetableInputSchema.parse(inputFromDraft(draft.data()!))
-      if (contentHash(currentInput) !== expectedHash) {
-        throw new Error('The timetable changed while it was being published. Try again.')
-      }
-      const publishedData = published.data()
-      if (published.exists && publishedData?.status === 'active' && publishedData?.contentHash === expectedHash) {
-        return {
-          changed: false,
-          revision: Number(publishedData.revision || 1),
-        }
-      }
-      const revision = Number(publishedData?.revision || 0) + 1
-      const now = Timestamp.now()
-      transaction.set(publishedReference, {
-        ...currentInput,
-        organisationId: auth.user.uid,
-        organisationName: auth.user.name,
-        timeZone,
-        assignedUserIds: audience.assignees.map(assignee => assignee.userId),
-        assignedGroupIds: audience.groupIds,
-        teacherUserIds,
-        audienceNames: audience.audienceNames,
-        revision,
-        status: 'active',
-        contentHash: expectedHash,
-        publishedAt: now,
-        archivedAt: null,
-        createdAt: publishedData?.createdAt || now,
-        updatedAt: now,
+    const db = database()
+    const item = (await db.select().from(timetables).where(eq(timetables.id, id)).limit(1))[0]
+    if (!item) return Response.json({ error: 'Timetable not found.' }, { status: 404 })
+    if (!(await canAdministerOrganization(auth.user, item.organizationId))) return Response.json({ error: 'Organization owner access required.' }, { status: 403 })
+    const draft = (await db.select().from(timetableVersions).where(and(eq(timetableVersions.timetableId, id), eq(timetableVersions.state, 'draft'))).orderBy(desc(timetableVersions.revision)).limit(1))[0]
+    if (!draft) return Response.json({ error: 'No draft version is available.' }, { status: 409 })
+    await db.transaction(async tx => {
+      await tx.update(timetableVersions).set({ state: 'published', publishedAt: new Date() }).where(eq(timetableVersions.id, draft.id))
+      await tx.update(timetables).set({ currentPublishedVersionId: draft.id, status: 'active', updatedAt: new Date() }).where(eq(timetables.id, id))
+      await tx.insert(emailJobs).values({
+        kind: 'timetable_published',
+        organizationId: item.organizationId,
+        entityType: 'timetable',
+        entityId: id,
+        payload: { versionId: draft.id },
+        scheduledFor: new Date(),
+        dedupeKey: `timetable:${id}:version:${draft.revision}:published`,
       })
-      transaction.update(draftReference, {
-        publishedRevision: revision,
-        updatedAt: now,
-      })
-      return { changed: true, revision }
+      const direct = await tx.select().from(timetableVersionUsers).where(eq(timetableVersionUsers.versionId, draft.id))
+      const groupIds = (await tx.select().from(timetableVersionGroups).where(eq(timetableVersionGroups.versionId, draft.id))).map(value => value.groupId)
+      const groupMembers = groupIds.length
+        ? await tx.select().from(organizationGroupMembers).where(inArray(organizationGroupMembers.groupId, groupIds))
+        : []
+      const recipientIds = [...new Set([...direct.map(value => value.userId), ...groupMembers.map(value => value.userId)])]
+      if (recipientIds.length) {
+        await tx.insert(notifications).values(recipientIds.map(userId => ({
+          type: 'timetable_published',
+          recipientUserId: userId,
+          title: `${item.name} published`,
+          detail: `Revision ${draft.revision} is now available.`,
+          href: '/timetables',
+          tone: 'amber',
+          icon: 'calendar',
+          dedupeKey: `timetable:${id}:revision:${draft.revision}:user:${userId}`,
+          visibleAt: new Date(),
+        })))
+      }
     })
-    await ensureTimetableAgendaJobs({
-      organisationId: auth.user.uid,
-      effectiveFrom: parsed.data.effectiveFrom,
-      effectiveTo: parsed.data.effectiveTo,
-      entries: parsed.data.entries,
-      timeZone,
-    })
-    return Response.json({
-      timetableId: id,
-      revision: result.revision,
-      changed: result.changed,
-    })
+    return Response.json({ versionId: draft.id, revision: draft.revision })
   } catch (error) {
-    return errorResponse(error, 'Unable to publish the timetable.')
+    return errorResponse(error, 'Unable to publish timetable.')
   }
 }

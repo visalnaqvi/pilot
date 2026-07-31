@@ -3,9 +3,8 @@
 import { ChangeEvent, CSSProperties, FormEvent, SyntheticEvent, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import Image from 'next/image'
-import { collection, deleteDoc, doc, onSnapshot, query, serverTimestamp, setDoc, updateDoc, where } from 'firebase/firestore'
-import { deleteObject, getDownloadURL, ref, uploadBytes } from 'firebase/storage'
-import { db, storage } from '@/lib/firebase'
+import { authenticatedFetch } from '@/lib/authenticated-fetch'
+import { uploadAuthorizedFile } from '@/lib/file-upload'
 import { useAuth, type UserProfile } from './auth-context'
 
 type OrganisationInvite = {
@@ -29,6 +28,11 @@ type ProfileForm = {
   facebookUrl: string
 }
 
+type OrganisationProfileData = UserProfile & {
+  profilePhotoUrl?: string
+  logoUrl?: string
+}
+
 const emptyForm: ProfileForm = {
   name: '',
   profilePhotoUrl: '',
@@ -40,7 +44,7 @@ const emptyForm: ProfileForm = {
   facebookUrl: '',
 }
 
-const profileFormFrom = (organisation: UserProfile): ProfileForm => ({
+const profileFormFrom = (organisation: OrganisationProfileData): ProfileForm => ({
   name: organisation.name || '',
   profilePhotoUrl: organisation.profilePhotoUrl || '',
   logoUrl: organisation.logoUrl || '',
@@ -51,7 +55,7 @@ const profileFormFrom = (organisation: UserProfile): ProfileForm => ({
   facebookUrl: organisation.facebookUrl || '',
 })
 
-const cleanUrl = (value?: string) => {
+const cleanUrl = (value?: string | null) => {
   if (!value) return ''
   try {
     const url = new URL(value)
@@ -63,7 +67,7 @@ const cleanUrl = (value?: string) => {
 
 export function OrganisationProfile({ organisationId }: { organisationId: string }) {
   const { user, profile } = useAuth()
-  const [organisation, setOrganisation] = useState<UserProfile | null>(null)
+  const [organisation, setOrganisation] = useState<OrganisationProfileData | null>(null)
   const [form, setForm] = useState<ProfileForm>(emptyForm)
   const [invite, setInvite] = useState<OrganisationInvite | null>(null)
   const [loading, setLoading] = useState(true)
@@ -71,40 +75,83 @@ export function OrganisationProfile({ organisationId }: { organisationId: string
   const [saving, setSaving] = useState(false)
   const [uploading, setUploading] = useState<'profilePhotoUrl' | 'logoUrl' | ''>('')
   const [message, setMessage] = useState('')
+  const [imagePaths, setImagePaths] = useState<{ profilePhotoUrl: string | null; logoUrl: string | null }>({ profilePhotoUrl: null, logoUrl: null })
 
-  const isOwner = profile?.role === 'organisation' && profile.uid === organisationId
+  const isOwner = profile?.role === 'organisation' && profile.organizationId === organisationId
   const canJoin = profile?.role === 'user'
 
-  useEffect(() => onSnapshot(
-    doc(db, 'users', organisationId),
-    snapshot => {
-      const loaded = snapshot.exists() ? ({ uid: snapshot.id, ...snapshot.data() } as UserProfile) : null
-      setOrganisation(loaded?.role === 'organisation' ? loaded : null)
-      if (loaded?.role === 'organisation') {
+  useEffect(() => {
+    if (!user) return
+    let active = true
+    void authenticatedFetch(user, `/api/organizations?id=${organisationId}`, { cache: 'no-store' }).then(async response => {
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || 'Unable to load this institute.')
+      const item = payload.item as {
+        id: string
+        name: string
+        profilePhotoPath?: string | null
+        logoPath?: string | null
+        profilePhotoUrl?: string
+        logoUrl?: string
+        address?: string | null
+        contactNumbers?: string[]
+        googleMapsUrl?: string | null
+        instagramUrl?: string | null
+        facebookUrl?: string | null
+      }
+      const loaded: OrganisationProfileData = {
+        uid: item.id,
+        email: '',
+        name: item.name,
+        role: 'organisation',
+        organizationId: item.id,
+        profilePhotoPath: item.profilePhotoPath,
+        logoPath: item.logoPath,
+        profilePhotoUrl: item.profilePhotoUrl,
+        logoUrl: item.logoUrl,
+        address: item.address,
+        contactNumbers: item.contactNumbers,
+        googleMapsUrl: item.googleMapsUrl,
+        instagramUrl: item.instagramUrl,
+        facebookUrl: item.facebookUrl,
+      }
+      if (active) {
+        setOrganisation(loaded)
+        setImagePaths({ profilePhotoUrl: item.profilePhotoPath || null, logoUrl: item.logoPath || null })
         setForm(current => editing
           ? { ...current, profilePhotoUrl: loaded.profilePhotoUrl || '', logoUrl: loaded.logoUrl || '' }
           : profileFormFrom(loaded))
+        setLoading(false)
       }
-      setLoading(false)
-    },
-    reason => {
-      setMessage(`Could not load this institute: ${reason.message}`)
-      setLoading(false)
-    },
-  ), [editing, organisationId])
+    }).catch(reason => {
+      if (active) {
+        setMessage(`Could not load this institute: ${reason instanceof Error ? reason.message : 'Unknown error'}`)
+        setLoading(false)
+      }
+    })
+    return () => { active = false }
+  }, [editing, organisationId, user])
 
   useEffect(() => {
     if (!user || !canJoin) return
-    return onSnapshot(
-      query(collection(db, 'organisationInvites'), where('userId', '==', user.uid)),
-      snapshot => {
-        const membership = snapshot.docs
-          .map(item => ({ id: item.id, ...item.data() }) as OrganisationInvite)
-          .find(item => item.organisationId === organisationId)
-        setInvite(membership || null)
-      },
-      reason => setMessage(`Could not load membership: ${reason.message}`),
-    )
+    let active = true
+    void authenticatedFetch(user, '/api/memberships', { cache: 'no-store' }).then(async response => {
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || 'Unable to load membership.')
+      const membership = (payload.items || []).find((item: { organizationId: string }) => item.organizationId === organisationId)
+      if (active) setInvite(membership ? {
+        id: `${membership.organizationId}:${membership.userId}`,
+        organisationId: membership.organizationId,
+        organisationEmail: membership.organizationName || '',
+        userId: membership.userId,
+        userEmail: membership.email,
+        initiatedBy: membership.initiatedBy === membership.userId ? 'user' : 'organisation',
+        status: membership.status,
+      } : null)
+    }).catch(reason => {
+      if (active) setMessage(`Could not load membership: ${reason instanceof Error ? reason.message : 'Unknown error'}`)
+    })
+    return () => { active = false }
   }, [canJoin, organisationId, user])
 
   const phones = useMemo(
@@ -130,11 +177,20 @@ export function OrganisationProfile({ organisationId }: { organisationId: string
     setUploading(field)
     setMessage('')
     try {
-      const imageRef = ref(storage, `organisation-profiles/${user.uid}/${field}`)
-      await uploadBytes(imageRef, file, { contentType: file.type })
-      const url = await getDownloadURL(imageRef)
-      await updateDoc(doc(db, 'users', user.uid), { [field]: url })
+      const uploaded = await uploadAuthorizedFile(user, file, organisationId)
+      const download = await authenticatedFetch(user, `/api/files/${uploaded.fileId}/download`)
+      const downloadPayload = await download.json()
+      if (!download.ok) throw new Error(downloadPayload.error || 'Unable to prepare image preview.')
+      const url = downloadPayload.url as string
+      const pathField = field === 'logoUrl' ? 'logoPath' : 'profilePhotoPath'
+      const response = await authenticatedFetch(user, '/api/organizations', {
+        method: 'PATCH',
+        body: JSON.stringify({ id: organisationId, [pathField]: uploaded.path }),
+      })
+      if (!response.ok) throw new Error((await response.json()).error || 'Unable to update institute image.')
+      setImagePaths(current => ({ ...current, [field]: uploaded.path }))
       setForm(current => ({ ...current, [field]: url }))
+      setOrganisation(current => current ? { ...current, [field]: url, [pathField]: uploaded.path } : current)
       setMessage(field === 'logoUrl' ? 'Logo updated.' : 'Profile photo updated.')
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : 'Unable to upload this image.')
@@ -151,15 +207,15 @@ export function OrganisationProfile({ organisationId }: { organisationId: string
     setUploading(field)
     setMessage('')
     try {
-      const imageRef = ref(storage, `organisation-profiles/${user.uid}/${field}`)
-      try {
-        await deleteObject(imageRef)
-      } catch (reason) {
-        const code = typeof reason === 'object' && reason && 'code' in reason ? reason.code : ''
-        if (code !== 'storage/object-not-found') throw reason
-      }
-      await updateDoc(doc(db, 'users', user.uid), { [field]: '' })
+      const pathField = field === 'logoUrl' ? 'logoPath' : 'profilePhotoPath'
+      const response = await authenticatedFetch(user, '/api/organizations', {
+        method: 'PATCH',
+        body: JSON.stringify({ id: organisationId, [pathField]: null }),
+      })
+      if (!response.ok) throw new Error((await response.json()).error || `Unable to remove the ${label}.`)
+      setImagePaths(current => ({ ...current, [field]: null }))
       setForm(current => ({ ...current, [field]: '' }))
+      setOrganisation(current => current ? { ...current, [field]: '', [pathField]: null } : current)
       setMessage(field === 'logoUrl' ? 'Logo removed.' : 'Profile photo removed.')
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : `Unable to remove the ${label}.`)
@@ -179,17 +235,31 @@ export function OrganisationProfile({ organisationId }: { organisationId: string
     setSaving(true)
     setMessage('')
     try {
-      await updateDoc(doc(db, 'users', user.uid), {
+      const response = await authenticatedFetch(user, '/api/organizations', {
+        method: 'PATCH',
+        body: JSON.stringify({
+        id: organisationId,
         name,
-        profilePhotoUrl: form.profilePhotoUrl.trim(),
-        logoUrl: form.logoUrl.trim(),
+        profilePhotoPath: imagePaths.profilePhotoUrl,
+        logoPath: imagePaths.logoUrl,
+        address: form.address.trim() || null,
+        contactNumbers: form.contactNumbers.split(/\r?\n|,/).map(item => item.trim()).filter(Boolean).slice(0, 6),
+        googleMapsUrl: form.googleMapsUrl.trim() || null,
+        instagramUrl: form.instagramUrl.trim() || null,
+        facebookUrl: form.facebookUrl.trim() || null,
+        }),
+      })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || 'Unable to save the profile.')
+      setOrganisation(current => current ? {
+        ...current,
+        name,
         address: form.address.trim(),
         contactNumbers: form.contactNumbers.split(/\r?\n|,/).map(item => item.trim()).filter(Boolean).slice(0, 6),
         googleMapsUrl: form.googleMapsUrl.trim(),
         instagramUrl: form.instagramUrl.trim(),
         facebookUrl: form.facebookUrl.trim(),
-        profileUpdatedAt: serverTimestamp(),
-      })
+      } : current)
       setEditing(false)
       setMessage('Institute profile saved.')
     } catch (reason) {
@@ -204,25 +274,28 @@ export function OrganisationProfile({ organisationId }: { organisationId: string
     setSaving(true)
     setMessage('')
     try {
-      const requestRef = doc(db, 'organisationInvites', `${organisationId}_${user.uid}`)
       if (invite?.status === 'pending' && invite.initiatedBy !== 'user') {
-        await updateDoc(requestRef, { status: 'accepted', respondedAt: serverTimestamp() })
+        const response = await authenticatedFetch(user, '/api/memberships', {
+          method: 'PATCH',
+          body: JSON.stringify({ organizationId: organisationId, userId: user.uid, status: 'accepted' }),
+        })
+        if (!response.ok) throw new Error((await response.json()).error || 'Unable to join institute.')
+        setInvite(current => current ? { ...current, status: 'accepted' } : current)
         setMessage(`You joined ${organisation.name || organisation.email}.`)
-      } else if (invite?.status === 'declined') {
-        await updateDoc(requestRef, { status: 'pending', initiatedBy: 'user', createdAt: serverTimestamp() })
-        setMessage(`Join request sent to ${organisation.name || organisation.email}.`)
-      } else if (!invite) {
-        await setDoc(requestRef, {
+      } else if (!invite || invite.status === 'declined') {
+        const response = await authenticatedFetch(user, '/api/memberships', {
+          method: 'POST',
+          body: JSON.stringify({ organizationId: organisationId, role: 'student' }),
+        })
+        if (!response.ok) throw new Error((await response.json()).error || 'Unable to request membership.')
+        setInvite({
+          id: `${organisationId}:${user.uid}`,
           organisationId,
-          organisationName: organisation.name || organisation.email,
-          organisationEmail: organisation.email,
+          organisationEmail: organisation.name || '',
           userId: user.uid,
-          userName: profile.name || profile.email,
           userEmail: profile.email,
           initiatedBy: 'user',
           status: 'pending',
-          memberRole: 'student',
-          createdAt: serverTimestamp(),
         })
         setMessage(`Join request sent to ${organisation.name || organisation.email}.`)
       }
@@ -239,7 +312,10 @@ export function OrganisationProfile({ organisationId }: { organisationId: string
     setSaving(true)
     setMessage('')
     try {
-      await deleteDoc(doc(db, 'organisationInvites', invite.id))
+      if (!user) return
+      const response = await authenticatedFetch(user, `/api/memberships?organizationId=${organisationId}&userId=${encodeURIComponent(user.uid)}`, { method: 'DELETE' })
+      if (!response.ok) throw new Error((await response.json()).error || 'Unable to leave this institute.')
+      setInvite(null)
       setMessage(`You left ${organisation.name || organisation.email}.`)
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : 'Unable to leave this institute.')

@@ -22,11 +22,15 @@ export function TimetableEditor(props: {
   assigneeCount: number
   saving: boolean
   publishing: boolean
-  canArchive: boolean
+  disabling: boolean
+  deleting: boolean
+  canDisable: boolean
+  canDelete: boolean
   setInput: (value: TimetableInput | ((current: TimetableInput) => TimetableInput)) => void
   save: (event: FormEvent) => void
   publish: () => void
-  archive: () => void
+  disable: () => void
+  remove: () => void
   close: () => void
 }) {
   const [groupSearch, setGroupSearch] = useState('')
@@ -181,7 +185,13 @@ export function TimetableEditor(props: {
 
       <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 bg-white px-5 py-4 sm:px-7">
         <p className="text-sm font-bold text-slate-600">{props.input.entries.length} class{props.input.entries.length === 1 ? '' : 'es'} · {props.assigneeCount} unique assignee{props.assigneeCount === 1 ? '' : 's'} · Morning agenda at 7:00 AM</p>
-        <div className="flex flex-wrap justify-end gap-2">{props.canArchive && <button type="button" disabled={props.saving || props.publishing} onClick={props.archive} className="rounded-xl border border-rose-300 px-4 py-2.5 text-sm font-black text-rose-700 hover:bg-rose-50 disabled:opacity-50">Archive</button>}<button type="button" onClick={props.close} className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-bold">Cancel</button><button disabled={props.saving || props.publishing} className="rounded-xl border border-indigo-300 px-4 py-2.5 text-sm font-black text-indigo-700 disabled:opacity-50">{props.saving ? 'Saving…' : 'Save draft'}</button><button type="button" disabled={props.saving || props.publishing} onClick={props.publish} className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-black text-white disabled:opacity-50">{props.publishing ? 'Publishing…' : 'Publish'}</button></div>
+        <div className="flex flex-wrap justify-end gap-2">
+          {props.canDisable && <button type="button" disabled={props.saving || props.publishing || props.disabling} onClick={props.disable} className="rounded-xl border border-amber-300 px-4 py-2.5 text-sm font-black text-amber-800 hover:bg-amber-50 disabled:opacity-50">{props.disabling ? 'Disabling…' : 'Disable timetable'}</button>}
+          {props.canDelete && <button type="button" disabled={props.saving || props.publishing || props.deleting} onClick={props.remove} className="rounded-xl border border-rose-300 px-4 py-2.5 text-sm font-black text-rose-700 hover:bg-rose-50 disabled:opacity-50">{props.deleting ? 'Deleting…' : 'Delete timetable'}</button>}
+          <button type="button" onClick={props.close} className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-bold">Cancel</button>
+          <button disabled={props.saving || props.publishing || props.disabling || props.deleting} className="rounded-xl border border-indigo-300 px-4 py-2.5 text-sm font-black text-indigo-700 disabled:opacity-50">{props.saving ? 'Saving…' : 'Save draft'}</button>
+          <button type="button" disabled={props.saving || props.publishing || props.disabling || props.deleting} onClick={props.publish} className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-black text-white disabled:opacity-50">{props.publishing ? 'Publishing…' : 'Publish'}</button>
+        </div>
       </footer>
     </form>
 

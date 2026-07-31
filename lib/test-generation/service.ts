@@ -1,596 +1,482 @@
 import 'server-only'
 
-import type { Response } from 'openai/resources/responses/responses'
-import { adminDb, FieldValue, adminStorage } from '@/lib/firebase-admin'
-import type { ServerRole } from '@/lib/admin-api'
+import { and, asc, eq, inArray, lt } from 'drizzle-orm'
+import OpenAI, { toFile } from 'openai'
+import { zodTextFormat } from 'openai/helpers/zod'
+import type { Response as OpenAIResponse } from 'openai/resources/responses/responses'
+import { z } from 'zod'
 import {
-  cancelResponse,
-  deleteOpenAIFiles,
-  generationModel,
-  parseAnalysisResponse,
-  parseGenerationResponse,
-  parseVerificationResponse,
-  responseUsage,
-  retrieveResponse,
-  startAnalysisResponse,
-  startGenerationResponse,
-  startVerificationResponse,
-  uploadSourcesToOpenAI,
-  type OpenAIFileReference,
-} from './openai'
+  categories,
+  files,
+  questionKeys,
+  questions,
+  testGenerationJobs,
+  testGenerationQuestions,
+  testGenerationSources,
+  testQuestions,
+  tests,
+} from '@/db/schema'
+import type { ServerUser } from '@/lib/admin-api'
+import { database } from '@/lib/db'
+import { normalizeExamKey } from '@/lib/exam-catalog'
+import { adminStorage } from '@/lib/firebase-admin'
+import { canManageOrganization } from '@/lib/services/access'
 import {
+  GeneratedMcqTestSchema,
+  GeneratedMcqSchema,
   GenerationConfigSchema,
-  GeneratedQuestionSchema,
-  gifFrameCount,
-  PublishGeneratedTestSchema,
-  SourceBundleSchema,
-  type GenerationStatus,
-  type SourceUpload,
-} from './schema'
+  repairGeneratedMcqContent,
+  isImageSource,
+} from '@/lib/test-generation/schema'
 
-export type GenerationUser = {
-  uid: string
-  role: ServerRole
-  name?: string | null
+const OPENAI_FILE_EXPIRY_SECONDS = 24 * 60 * 60
+const UNSTARTED_GENERATION_TIMEOUT_MS = 5 * 60 * 1000
+
+function openAIClient() {
+  if (!process.env.OPENAI_API_KEY) throw new Error('OpenAI is not configured.')
+  return new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 }
 
-export type GenerationJob = {
-  id: string
-  ownerId: string
-  createdBy: string
-  status: GenerationStatus
-  sources?: SourceUpload[]
-  openaiFiles?: OpenAIFileReference[]
-  activeResponseId?: string
-  activeStage?: 'analysis' | 'generation' | 'verification'
-  analysis?: unknown
-  config?: unknown
-  titleSuggestion?: string
-  descriptionSuggestion?: string
-  failedStage?: 'analysis' | 'generation' | 'verification'
-  error?: string
-  publishedTestId?: string
-  model?: string
-  retryCount?: number
-}
-
-function jobReference(jobId: string) {
-  return adminDb.collection('testGenerationJobs').doc(jobId)
-}
-
-function candidateReference(jobId: string, questionId: string) {
-  return jobReference(jobId).collection('questions').doc(questionId)
-}
-
-function sanitizeError(error: unknown) {
+function sanitizeGenerationError(error: unknown) {
   const message = error instanceof Error ? error.message : 'AI test generation failed.'
+  if (/request too large[\s\S]*tokens per min|\bTPM\b/i.test(message)) {
+    return [
+      'The uploaded material is too large to process in one model request under the current OpenAI token limit.',
+      'Try again with a smaller PDF or split the material into fewer pages.',
+    ].join(' ')
+  }
   return message.replace(/sk-[A-Za-z0-9_-]+/g, '[redacted]').slice(0, 1000)
 }
 
-export async function loadGenerationJob(jobId: string) {
-  const snapshot = await jobReference(jobId).get()
-  return snapshot.exists ? ({ id: snapshot.id, ...snapshot.data() } as GenerationJob) : null
+function generationOutputTokenBudget(questionCount: number) {
+  return Math.min(40_000, Math.max(8_000, 2_000 + questionCount * 700))
 }
 
-export function canReviewGenerationJob(job: GenerationJob, user: GenerationUser) {
-  return user.role === 'admin' || (user.role === 'organisation' && job.ownerId === user.uid)
+function responseUsage(response: OpenAIResponse) {
+  return response.usage
+    ? {
+        inputTokens: response.usage.input_tokens,
+        outputTokens: response.usage.output_tokens,
+        totalTokens: response.usage.total_tokens,
+      }
+    : null
 }
 
-export async function requireGenerationJob(jobId: string, user: GenerationUser) {
-  const job = await loadGenerationJob(jobId)
-  if (!job) throw Object.assign(new Error('Generation draft not found.'), { status: 404 })
-  if (!canReviewGenerationJob(job, user)) {
-    throw Object.assign(new Error('You cannot access this generation draft.'), { status: 403 })
+export async function requireGenerationJob(id: string, user: ServerUser) {
+  const job = (await database().select().from(testGenerationJobs).where(eq(testGenerationJobs.id, id)).limit(1))[0]
+  if (!job) throw Object.assign(new Error('AI test draft not found.'), { status: 404 })
+  if (user.globalRole !== 'admin' && !(await canManageOrganization(user, job.organizationId))) {
+    throw Object.assign(new Error('AI test draft access required.'), { status: 403 })
   }
   return job
 }
 
-export async function createGenerationJob(user: GenerationUser) {
-  if (user.role !== 'organisation') {
-    throw Object.assign(new Error('Only organisation accounts can create AI test drafts.'), { status: 403 })
-  }
-  const reference = jobReference(adminDb.collection('testGenerationJobs').doc().id)
-  await reference.set({
-    ownerId: user.uid,
+export async function createGenerationJob(user: ServerUser) {
+  if (!user.organizationId) throw Object.assign(new Error('An organization is required.'), { status: 403 })
+  if (!(await canManageOrganization(user, user.organizationId))) throw Object.assign(new Error('Organization manager access required.'), { status: 403 })
+  const [job] = await database().insert(testGenerationJobs).values({
+    organizationId: user.organizationId,
     createdBy: user.uid,
-    createdByName: user.name || '',
-    status: 'uploading',
-    model: generationModel(),
-    retryCount: 0,
-    createdAt: FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp(),
-  })
-  return reference.id
+    model: process.env.OPENAI_TEST_GENERATION_MODEL || 'gpt-5.6-terra',
+  }).returning()
+  return job.id
 }
 
-async function validateStoredSources(job: GenerationJob, rawSources: unknown) {
-  const sources = SourceBundleSchema.parse(rawSources)
-  const expectedPrefix = `test-generation-sources/${job.ownerId}/${job.id}/`
-  if (sources.some(source => !source.path.startsWith(expectedPrefix))) throw new Error('An uploaded source path is invalid.')
-
-  await Promise.all(sources.map(async source => {
-    const storedFile = adminStorage.bucket().file(source.path)
-    const [metadata] = await storedFile.getMetadata()
-    const storedSize = Number(metadata.size)
-    const contentType = String(metadata.contentType || '')
-    if (storedSize !== source.size || contentType !== source.mimeType) {
-      throw new Error(`Uploaded source metadata does not match ${source.name}.`)
-    }
-    if (source.mimeType.toLowerCase() === 'image/gif') {
-      const [contents] = await storedFile.download()
-      if (gifFrameCount(contents) !== 1) throw new Error(`${source.name} must be a valid, non-animated GIF.`)
-    }
-  }))
-  return sources
-}
-
-export async function finalizeGenerationUpload(jobId: string, user: GenerationUser, rawSources: unknown) {
-  const job = await requireGenerationJob(jobId, user)
-  if (job.status !== 'uploading' && !(job.status === 'failed' && job.failedStage === 'analysis')) {
-    throw new Error('This generation draft is not waiting for uploads.')
+export async function attachGenerationSources(id: string, user: ServerUser, fileIds: string[]) {
+  const job = await requireGenerationJob(id, user)
+  const sourceFiles = await database().select().from(files).where(inArray(files.id, fileIds))
+  if (sourceFiles.length !== fileIds.length || sourceFiles.some(file => file.ownerUserId !== user.uid || file.deletedAt)) {
+    throw Object.assign(new Error('One or more source files are unavailable.'), { status: 400 })
   }
-  const sources = await validateStoredSources(job, rawSources)
-  const openaiFiles = await uploadSourcesToOpenAI(sources)
+  await database().transaction(async tx => {
+    await tx.delete(testGenerationSources).where(eq(testGenerationSources.jobId, id))
+    await tx.insert(testGenerationSources).values(fileIds.map((fileId, position) => ({ jobId: id, fileId, position })))
+    await tx.update(testGenerationJobs).set({ status: 'analysis_ready', updatedAt: new Date() }).where(eq(testGenerationJobs.id, job.id))
+  })
+}
+
+export async function listGeneratedQuestions(id: string) {
+  return database().select().from(testGenerationQuestions).where(eq(testGenerationQuestions.jobId, id)).orderBy(asc(testGenerationQuestions.position))
+}
+
+async function generatedMcqRepairDefaults(job: typeof testGenerationJobs.$inferSelect) {
+  const config = GenerationConfigSchema.safeParse(job.config)
+  const sourceFiles = await database().select({
+    id: files.id,
+    name: files.name,
+  }).from(testGenerationSources)
+    .innerJoin(files, eq(files.id, testGenerationSources.fileId))
+    .where(eq(testGenerationSources.jobId, job.id))
+    .orderBy(testGenerationSources.position)
+  return {
+    topic: config.success ? config.data.subject : 'Study material',
+    difficulty: config.success && config.data.difficulty !== 'mixed'
+      ? config.data.difficulty
+      : 'medium' as const,
+    sourceReferences: sourceFiles.map(file => ({
+      sourceId: file.id,
+      filename: file.name,
+      locator: 'Uploaded file',
+      excerpt: 'Source material used to generate this question.',
+    })),
+  }
+}
+
+export async function generateFromSources(id: string, user: ServerUser, config: unknown) {
+  const job = await requireGenerationJob(id, user)
+  const parsedConfig = GenerationConfigSchema.parse(config)
+  const canStart = job.status === 'analysis_ready'
+    || (job.status === 'failed' && job.failedStage === 'generation')
+  if (!canStart) {
+    if (job.status === 'generating' && job.activeResponseId) return job.activeResponseId
+    throw Object.assign(new Error('Complete source analysis before generating questions.'), { status: 409 })
+  }
+
+  const db = database()
+  const sources = await db.select({
+    source: testGenerationSources,
+    file: files,
+  }).from(testGenerationSources)
+    .innerJoin(files, eq(files.id, testGenerationSources.fileId))
+    .where(eq(testGenerationSources.jobId, id))
+    .orderBy(testGenerationSources.position)
+  if (!sources.length) throw Object.assign(new Error('Upload at least one source file.'), { status: 409 })
+
+  const now = new Date()
+  const claimed = await db.update(testGenerationJobs).set({
+    status: 'generating',
+    config: parsedConfig,
+    activeStage: 'generation',
+    activeResponseId: null,
+    stageStartedAt: now,
+    failedStage: null,
+    error: null,
+    updatedAt: now,
+  }).where(and(
+    eq(testGenerationJobs.id, id),
+    eq(testGenerationJobs.status, job.status),
+  )).returning({ id: testGenerationJobs.id })
+  if (!claimed.length) throw Object.assign(new Error('This generation draft changed. Refresh and try again.'), { status: 409 })
+
+  let responseId: string | null = null
   try {
-    const response = await startAnalysisResponse(job.id, openaiFiles)
-    await jobReference(job.id).update({
-      sources,
-      openaiFiles,
-      status: 'analyzing',
-      activeStage: 'analysis',
-      activeResponseId: response.id,
-      'responseIds.analysis': response.id,
-      stageStartedAt: FieldValue.serverTimestamp(),
-      failedStage: FieldValue.delete(),
-      error: FieldValue.delete(),
-      updatedAt: FieldValue.serverTimestamp(),
+    const client = openAIClient()
+    const uploaded: Array<{
+      sourceId: string
+      filename: string
+      mimeType: string
+      fileId: string
+    }> = []
+    for (const source of sources) {
+      const [buffer] = await adminStorage.bucket().file(source.file.path).download()
+      const openaiFile = await client.files.create({
+        file: await toFile(buffer, source.file.name, { type: source.file.contentType }),
+        purpose: isImageSource(source.file.contentType) ? 'vision' : 'user_data',
+        expires_after: { anchor: 'created_at', seconds: OPENAI_FILE_EXPIRY_SECONDS },
+      })
+      uploaded.push({
+        sourceId: source.file.id,
+        filename: source.file.name,
+        mimeType: source.file.contentType,
+        fileId: openaiFile.id,
+      })
+      await db.update(testGenerationSources).set({ openaiFileId: openaiFile.id }).where(eq(testGenerationSources.id, source.source.id))
+    }
+    const response = await client.responses.create({
+      model: job.model,
+      background: true,
+      max_output_tokens: generationOutputTokenBudget(parsedConfig.mcqCount),
+      reasoning: { effort: 'low' },
+      metadata: {
+        test_generation_job_id: id,
+        test_generation_stage: 'generation',
+      },
+      instructions: [
+        'Create a rigorous mock test grounded only in the uploaded educational material.',
+        'Do not use web search or outside sources.',
+        'Cover only the selected topics, use the requested language and difficulty, avoid trivia and duplicate questions.',
+        `Return exactly ${parsedConfig.mcqCount} questions and make every question an MCQ.`,
+        `Assign exactly ${parsedConfig.mcqMarks} marks to every question.`,
+        'Each MCQ must have four distinct plausible options and exactly one correct answer.',
+        'Every question must cite one or more uploaded sources using the supplied source ID and exact filename.',
+        'Use stable question IDs q-001, q-002, and so on.',
+      ].join(' '),
+      input: [{
+        role: 'user',
+        content: [
+          {
+            type: 'input_text' as const,
+            text: [
+              `Configuration: ${JSON.stringify(parsedConfig)}`,
+              'Available source identifiers:',
+              ...uploaded.map(file => `- ${file.sourceId}: ${file.filename}`),
+            ].join('\n'),
+          },
+          ...uploaded.map(file => isImageSource(file.mimeType)
+            ? {
+                type: 'input_image' as const,
+                file_id: file.fileId,
+                detail: 'original' as const,
+              }
+            : {
+                type: 'input_file' as const,
+                file_id: file.fileId,
+                // GPT-5.6 resolves PDF "auto" to high detail. Low detail keeps
+                // extracted PDF text while substantially reducing page-image tokens.
+                detail: file.mimeType === 'application/pdf' ? 'low' as const : 'auto' as const,
+              }),
+        ],
+      }],
+      text: { format: zodTextFormat(GeneratedMcqTestSchema, 'generated_mock_test') },
     })
+    responseId = response.id
+    await db.update(testGenerationJobs).set({
+      activeResponseId: response.id,
+      responseIds: { ...(job.responseIds || {}), generation: response.id },
+      updatedAt: new Date(),
+    }).where(and(
+      eq(testGenerationJobs.id, id),
+      eq(testGenerationJobs.status, 'generating'),
+    ))
+    return response.id
   } catch (error) {
-    await deleteOpenAIFiles(openaiFiles)
+    if (responseId) await openAIClient().responses.cancel(responseId).catch(() => null)
+    await db.update(testGenerationJobs).set({
+      status: 'failed',
+      failedStage: 'generation',
+      activeResponseId: null,
+      error: sanitizeGenerationError(error),
+      updatedAt: new Date(),
+    }).where(and(
+      eq(testGenerationJobs.id, id),
+      eq(testGenerationJobs.status, 'generating'),
+    ))
     throw error
   }
 }
 
-export async function startGeneration(jobId: string, user: GenerationUser, rawConfig: unknown) {
-  const job = await requireGenerationJob(jobId, user)
-  if (job.status !== 'analysis_ready' && !(job.status === 'failed' && job.failedStage === 'generation')) {
-    throw new Error('Complete source analysis before generating questions.')
-  }
-  if (!job.openaiFiles?.length) throw new Error('The uploaded files are no longer available for generation.')
-  const config = GenerationConfigSchema.parse(rawConfig)
-  const response = await startGenerationResponse({ jobId, files: job.openaiFiles, config })
-  await jobReference(jobId).update({
-    config,
-    status: 'generating',
-    activeStage: 'generation',
-    activeResponseId: response.id,
-    'responseIds.generation': response.id,
-    stageStartedAt: FieldValue.serverTimestamp(),
-    failedStage: FieldValue.delete(),
-    error: FieldValue.delete(),
-    updatedAt: FieldValue.serverTimestamp(),
-  })
-}
-
-async function recordFailure(job: GenerationJob, error: unknown) {
-  await jobReference(job.id).update({
-    status: 'failed',
-    failedStage: job.activeStage || 'analysis',
-    error: sanitizeError(error),
-    activeResponseId: FieldValue.delete(),
-    updatedAt: FieldValue.serverTimestamp(),
-  })
-}
-
-async function completeAnalysis(job: GenerationJob, response: Response) {
-  const analysis = parseAnalysisResponse(response)
-  await jobReference(job.id).update({
-    analysis,
-    status: 'analysis_ready',
-    usage: { analysis: responseUsage(response) },
-    'latencyMs.analysis': Math.max(0, Date.now() - response.created_at * 1000),
-    activeResponseId: FieldValue.delete(),
-    activeStage: FieldValue.delete(),
-    updatedAt: FieldValue.serverTimestamp(),
-  })
-}
-
-async function completeGeneration(job: GenerationJob, response: Response) {
-  const generated = parseGenerationResponse(response)
-  const config = GenerationConfigSchema.parse(job.config)
-  if (generated.questions.length !== config.mcqCount || generated.questions.some(question => question.kind !== 'mcq')) {
-    throw new Error(`The model must return exactly ${config.mcqCount} MCQs. Short-answer questions are temporarily disabled.`)
-  }
-  const batch = adminDb.batch()
-  generated.questions.forEach((question, position) => {
-    batch.set(candidateReference(job.id, question.id), {
-      ...question,
-      position,
-      reviewStatus: 'pending',
-      verificationStatus: 'pending',
-      editedAfterVerification: false,
-      createdAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-    })
-  })
-  batch.update(jobReference(job.id), {
-    titleSuggestion: generated.titleSuggestion,
-    descriptionSuggestion: generated.descriptionSuggestion,
-    status: 'verification_starting',
-    'usage.generation': responseUsage(response),
-    'latencyMs.generation': Math.max(0, Date.now() - response.created_at * 1000),
-    activeResponseId: FieldValue.delete(),
-    activeStage: FieldValue.delete(),
-    updatedAt: FieldValue.serverTimestamp(),
-  })
-  await batch.commit()
-  const verificationResponse = await startVerificationResponse({
-    jobId: job.id,
-    files: job.openaiFiles || [],
-    questions: generated.questions,
-  })
-  await jobReference(job.id).update({
-    status: 'verifying',
-    activeStage: 'verification',
-    activeResponseId: verificationResponse.id,
-    'responseIds.verification': verificationResponse.id,
-    stageStartedAt: FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp(),
-  })
-}
-
-async function completeVerification(job: GenerationJob, response: Response) {
-  const verification = parseVerificationResponse(response)
-  const candidateSnapshots = await jobReference(job.id).collection('questions').get()
-  const candidates = new Map(candidateSnapshots.docs.map(item => [item.id, item]))
-  const batch = adminDb.batch()
-  for (const result of verification.questions) {
-    const candidate = candidates.get(result.questionId)
-    if (!candidate) continue
-    batch.update(candidate.ref, {
-      verificationStatus: result.status,
-      verificationConfidence: result.confidence,
-      verificationIssues: result.issues,
-      suggestedFix: result.suggestedFix,
-      reviewStatus: result.status === 'unsupported' ? 'needs_changes' : 'pending',
-      updatedAt: FieldValue.serverTimestamp(),
-    })
-  }
-  batch.update(jobReference(job.id), {
-    status: 'review',
-    'usage.verification': responseUsage(response),
-    'latencyMs.verification': Math.max(0, Date.now() - response.created_at * 1000),
-    activeResponseId: FieldValue.delete(),
-    activeStage: FieldValue.delete(),
-    completedAt: FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp(),
-  })
-  await batch.commit()
-  await deleteOpenAIFiles(job.openaiFiles || [])
-  await jobReference(job.id).update({ openaiFiles: FieldValue.delete() })
-}
-
 export async function processGenerationResponse(responseId: string) {
-  const matches = await adminDb.collection('testGenerationJobs')
-    .where('activeResponseId', '==', responseId)
-    .limit(1)
-    .get()
-  const snapshot = matches.docs[0]
-  if (!snapshot) return
-  const job = { id: snapshot.id, ...snapshot.data() } as GenerationJob
-  const response = await retrieveResponse(responseId)
+  const db = database()
+  const job = (await db.select().from(testGenerationJobs)
+    .where(eq(testGenerationJobs.activeResponseId, responseId))
+    .limit(1))[0]
+  if (!job || job.status !== 'generating' || job.activeStage !== 'generation') return
+
+  let response: OpenAIResponse
+  try {
+    response = await openAIClient().responses.retrieve(responseId)
+  } catch (error) {
+    // A transient retrieval error must not turn a running response into a failed job.
+    console.error(`Unable to retrieve OpenAI response ${responseId}:`, error)
+    return
+  }
   if (response.status === 'queued' || response.status === 'in_progress') return
   if (response.status !== 'completed') {
-    await recordFailure(job, new Error(`OpenAI response ended with status ${response.status}.`))
+    const reason = response.error?.message
+      || response.incomplete_details?.reason
+      || `OpenAI response ended with status ${response.status}.`
+    await db.update(testGenerationJobs).set({
+      status: 'failed',
+      failedStage: 'generation',
+      activeResponseId: null,
+      error: sanitizeGenerationError(new Error(reason)),
+      updatedAt: new Date(),
+    }).where(and(
+      eq(testGenerationJobs.id, job.id),
+      eq(testGenerationJobs.activeResponseId, responseId),
+    ))
     return
   }
+
   try {
-    if (job.activeStage === 'analysis') await completeAnalysis(job, response)
-    else if (job.activeStage === 'generation') await completeGeneration(job, response)
-    else if (job.activeStage === 'verification') await completeVerification(job, response)
+    const generated = GeneratedMcqTestSchema.parse(JSON.parse(response.output_text))
+    const config = GenerationConfigSchema.parse(job.config)
+    if (generated.questions.length !== config.mcqCount) {
+      throw new Error(`The model returned ${generated.questions.length} questions instead of ${config.mcqCount}. Retry generation.`)
+    }
+    await db.transaction(async tx => {
+      const completed = await tx.update(testGenerationJobs).set({
+        status: 'review',
+        titleSuggestion: generated.titleSuggestion,
+        descriptionSuggestion: generated.descriptionSuggestion,
+        activeResponseId: null,
+        activeStage: null,
+        usage: { ...(job.usage || {}), generation: responseUsage(response) },
+        latencyMs: {
+          ...(job.latencyMs || {}),
+          generation: Math.max(0, Date.now() - response.created_at * 1000),
+        },
+        updatedAt: new Date(),
+      }).where(and(
+        eq(testGenerationJobs.id, job.id),
+        eq(testGenerationJobs.status, 'generating'),
+        eq(testGenerationJobs.activeResponseId, responseId),
+      )).returning({ id: testGenerationJobs.id })
+      if (!completed.length) return
+
+      await tx.delete(testGenerationQuestions).where(eq(testGenerationQuestions.jobId, job.id))
+      await tx.insert(testGenerationQuestions).values(generated.questions.map((content, position) => ({
+        jobId: job.id,
+        candidateKey: content.id,
+        position,
+        content,
+        reviewStatus: 'pending',
+        verificationStatus: 'verified',
+        verification: { mode: 'source_grounded_generation' },
+      })))
+    })
   } catch (error) {
-    const latest = await loadGenerationJob(job.id)
-    await recordFailure(latest || job, error)
+    await db.update(testGenerationJobs).set({
+      status: 'failed',
+      failedStage: 'generation',
+      activeResponseId: null,
+      error: sanitizeGenerationError(error),
+      updatedAt: new Date(),
+    }).where(and(
+      eq(testGenerationJobs.id, job.id),
+      eq(testGenerationJobs.activeResponseId, responseId),
+    ))
   }
 }
 
-export async function reconcileGenerationJob(jobId: string, user: GenerationUser) {
-  const job = await requireGenerationJob(jobId, user)
-  if (job.activeResponseId) await processGenerationResponse(job.activeResponseId)
-  return loadGenerationJob(jobId)
+export async function reconcileGenerationJob(id: string, user: ServerUser) {
+  let job = await requireGenerationJob(id, user)
+  if (job.status === 'generating' && job.activeResponseId) {
+    await processGenerationResponse(job.activeResponseId)
+    job = await requireGenerationJob(id, user)
+  } else if (
+    job.status === 'generating'
+    && !job.activeResponseId
+    && job.stageStartedAt
+    && job.stageStartedAt.getTime() < Date.now() - UNSTARTED_GENERATION_TIMEOUT_MS
+  ) {
+    await database().update(testGenerationJobs).set({
+      status: 'failed',
+      failedStage: 'generation',
+      error: 'The generation request did not start. Retry this stage.',
+      updatedAt: new Date(),
+    }).where(and(
+      eq(testGenerationJobs.id, id),
+      eq(testGenerationJobs.status, 'generating'),
+      lt(testGenerationJobs.stageStartedAt, new Date(Date.now() - UNSTARTED_GENERATION_TIMEOUT_MS)),
+    ))
+    job = await requireGenerationJob(id, user)
+  }
+  return job
 }
 
-export async function retryGenerationJob(jobId: string, user: GenerationUser) {
-  const job = await requireGenerationJob(jobId, user)
-  if (job.status !== 'failed') throw new Error('Only a failed generation stage can be retried.')
-  if (Number(job.retryCount || 0) >= 3) throw new Error('This draft has reached the automatic retry limit.')
-  const failedStage = job.failedStage || 'analysis'
-  if (failedStage === 'analysis') {
-    if (!job.sources?.length) throw new Error('The uploaded source metadata is missing.')
-    const files = job.openaiFiles?.length ? job.openaiFiles : await uploadSourcesToOpenAI(job.sources)
-    const response = await startAnalysisResponse(job.id, files)
-    await jobReference(job.id).update({
-      openaiFiles: files,
-      status: 'analyzing',
-      activeStage: 'analysis',
-      activeResponseId: response.id,
-      'responseIds.analysis': response.id,
-      stageStartedAt: FieldValue.serverTimestamp(),
-      retryCount: FieldValue.increment(1),
-      failedStage: FieldValue.delete(),
-      error: FieldValue.delete(),
-      updatedAt: FieldValue.serverTimestamp(),
-    })
-    return
-  }
-  if (failedStage === 'generation') {
-    if (!job.config) throw new Error('The approved generation configuration is missing.')
-    await startGeneration(job.id, user, job.config)
-    await jobReference(job.id).update({ retryCount: FieldValue.increment(1) })
-    return
-  }
-  if (failedStage === 'verification') {
-    if (!job.openaiFiles?.length) throw new Error('The temporary source files have expired. Regenerate the draft.')
-    const questions = (await listGeneratedQuestions(job.id)).map(item => GeneratedQuestionSchema.parse(item))
-    const response = await startVerificationResponse({ jobId: job.id, files: job.openaiFiles, questions })
-    await jobReference(job.id).update({
-      status: 'verifying',
-      activeStage: 'verification',
-      activeResponseId: response.id,
-      'responseIds.verification': response.id,
-      stageStartedAt: FieldValue.serverTimestamp(),
-      retryCount: FieldValue.increment(1),
-      failedStage: FieldValue.delete(),
-      error: FieldValue.delete(),
-      updatedAt: FieldValue.serverTimestamp(),
-    })
-    return
-  }
-  throw new Error('This failed stage cannot be retried.')
-}
-
-export async function updateGeneratedQuestion(
-  jobId: string,
-  questionId: string,
-  user: GenerationUser,
-  input: unknown,
-) {
-  const job = await requireGenerationJob(jobId, user)
-  if (job.status !== 'review') throw new Error('Questions can only be edited during review.')
-  const body = input && typeof input === 'object' ? input as Record<string, unknown> : {}
-  const reviewStatus = body.reviewStatus
-  if (!['approved', 'rejected', 'needs_changes', 'pending'].includes(String(reviewStatus))) {
-    throw new Error('Choose a valid review status.')
-  }
-  const question = GeneratedQuestionSchema.parse(body.question)
-  if (question.id !== questionId) throw new Error('Question identifier mismatch.')
-  const existing = await candidateReference(jobId, questionId).get()
-  if (!existing.exists) throw Object.assign(new Error('Generated question not found.'), { status: 404 })
-  const previous = existing.data() || {}
-  const edited = JSON.stringify(GeneratedQuestionSchema.parse(previous)) !== JSON.stringify(question)
-  const overridesUnsupported = reviewStatus === 'approved'
-    && previous.verificationStatus === 'unsupported'
-    && !edited
-  await existing.ref.update({
-    ...question,
-    reviewStatus,
-    editedAfterVerification: edited || previous.editedAfterVerification === true,
-    ...(edited && previous.verificationStatus === 'unsupported'
-      ? { verificationStatus: 'edited', verificationIssues: [] }
-      : {}),
-    ...(overridesUnsupported
-      ? {
-          unsupportedOverrideApproved: true,
-          unsupportedOverrideApprovedBy: user.uid,
-          unsupportedOverrideApprovedAt: FieldValue.serverTimestamp(),
-        }
-      : reviewStatus !== 'approved'
-        ? {
-            unsupportedOverrideApproved: FieldValue.delete(),
-            unsupportedOverrideApprovedBy: FieldValue.delete(),
-            unsupportedOverrideApprovedAt: FieldValue.delete(),
-          }
-        : {}),
-    reviewedBy: user.uid,
-    reviewedAt: FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp(),
+export async function updateGeneratedQuestion(id: string, questionId: string, user: ServerUser, input: unknown) {
+  const job = await requireGenerationJob(id, user)
+  if (job.status !== 'review') throw Object.assign(new Error('Questions can only be edited during review.'), { status: 409 })
+  const body = z.object({
+    content: z.record(z.string(), z.unknown()).optional(),
+    reviewStatus: z.enum(['pending', 'accepted', 'rejected']).optional(),
+  }).parse(input)
+  const current = (await database().select().from(testGenerationQuestions).where(and(
+    eq(testGenerationQuestions.id, questionId),
+    eq(testGenerationQuestions.jobId, id),
+  )).limit(1))[0]
+  if (!current) throw Object.assign(new Error('Generated question not found.'), { status: 404 })
+  const defaults = await generatedMcqRepairDefaults(job)
+  const repaired = repairGeneratedMcqContent(current.content, {
+    ...defaults,
+    id: current.candidateKey,
   })
+  const content = body.content
+    ? GeneratedMcqSchema.parse({ ...repaired, ...body.content })
+    : repaired
+  await database().update(testGenerationQuestions).set({
+    content,
+    ...(body.content ? { editedAfterVerification: true } : {}),
+    ...(body.reviewStatus ? { reviewStatus: body.reviewStatus } : {}),
+    updatedAt: new Date(),
+  }).where(and(eq(testGenerationQuestions.id, questionId), eq(testGenerationQuestions.jobId, id)))
 }
 
-export async function listGeneratedQuestions(jobId: string) {
-  const snapshot = await jobReference(jobId).collection('questions').orderBy('position').get()
-  return snapshot.docs.map(item => ({ id: item.id, ...item.data() }))
-}
-
-export async function reorderGeneratedQuestions(jobId: string, user: GenerationUser, rawQuestionIds: unknown) {
-  const job = await requireGenerationJob(jobId, user)
-  if (job.status !== 'review') throw new Error('Questions can only be reordered during review.')
-  if (!Array.isArray(rawQuestionIds) || rawQuestionIds.some(id => typeof id !== 'string')) {
-    throw new Error('Provide a valid ordered question list.')
-  }
-  const existing = await jobReference(jobId).collection('questions').get()
-  const ids = rawQuestionIds as string[]
-  if (ids.length !== existing.size || new Set(ids).size !== ids.length || ids.some(id => !existing.docs.some(item => item.id === id))) {
-    throw new Error('The ordered list must include every generated question exactly once.')
-  }
-  const batch = adminDb.batch()
-  ids.forEach((id, position) => batch.update(candidateReference(jobId, id), {
-    position,
-    updatedAt: FieldValue.serverTimestamp(),
-  }))
-  await batch.commit()
-}
-
-export async function cancelGenerationJob(jobId: string, user: GenerationUser) {
-  const job = await requireGenerationJob(jobId, user)
-  if (job.publishedTestId) throw new Error('Published generation records cannot be discarded.')
-  if (job.activeResponseId) await cancelResponse(job.activeResponseId)
-  await deleteOpenAIFiles(job.openaiFiles || [])
-  await Promise.allSettled((job.sources || []).map(source => adminStorage.bucket().file(source.path).delete()))
-  const questions = await jobReference(jobId).collection('questions').get()
-  const batch = adminDb.batch()
-  questions.docs.forEach(item => batch.delete(item.ref))
-  batch.update(jobReference(jobId), {
-    status: 'cancelled',
-    sources: FieldValue.delete(),
-    openaiFiles: FieldValue.delete(),
-    activeResponseId: FieldValue.delete(),
-    activeStage: FieldValue.delete(),
-    cancelledAt: FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp(),
-  })
-  await batch.commit()
-}
-
-export async function publishGenerationJob(
-  jobId: string,
-  user: GenerationUser,
-  rawInput: unknown,
-) {
-  const input = PublishGeneratedTestSchema.parse(rawInput)
-  let job = await requireGenerationJob(jobId, user)
-  if (job.publishedTestId) return job.publishedTestId
-  if (job.status !== 'review' && job.status !== 'publishing') {
-    throw new Error('Complete question review before publishing this test.')
-  }
-
-  const [exam, category, candidateSnapshots] = await Promise.all([
-    adminDb.collection('examCatalog').doc(input.examId).get(),
-    adminDb.collection('categories').doc(input.categoryId).get(),
-    jobReference(jobId).collection('questions').orderBy('position').get(),
-  ])
-  if (!exam.exists) throw new Error('Select a valid exam.')
-  if (!category.exists || category.data()?.examId !== input.examId) {
-    throw new Error('Select a category belonging to the chosen exam.')
-  }
-  if (category.data()?.createdBy !== job.ownerId) {
-    throw new Error('Select a category owned by this organisation.')
-  }
-
-  const candidates = candidateSnapshots.docs.map(item => ({
-    reference: item.ref,
-    data: GeneratedQuestionSchema.parse(item.data()),
-    reviewStatus: item.data().reviewStatus,
-    verificationStatus: item.data().verificationStatus,
-    unsupportedOverrideApproved: item.data().unsupportedOverrideApproved === true,
-    reviewedBy: item.data().reviewedBy,
-  }))
-  const approved = candidates.filter(item => item.reviewStatus === 'approved' && item.data.kind === 'mcq')
-  if (!approved.length) throw new Error('Approve at least one MCQ before publishing.')
-
-  const reservedTestId = String((await jobReference(jobId).get()).data()?.publishingTestId || '')
-    || adminDb.collection('tests').doc().id
-  await adminDb.runTransaction(async transaction => {
-    const snapshot = await transaction.get(jobReference(jobId))
-    const current = snapshot.data()
-    if (current?.publishedTestId) return
-    if (current?.status !== 'review' && current?.status !== 'publishing') {
-      throw new Error('This draft is no longer ready to publish.')
+export async function reorderGeneratedQuestions(id: string, user: ServerUser, questionIds: unknown) {
+  await requireGenerationJob(id, user)
+  const ids = z.array(z.string().uuid()).parse(questionIds)
+  await database().transaction(async tx => {
+    for (const [position, questionId] of ids.entries()) {
+      await tx.update(testGenerationQuestions).set({ position, updatedAt: new Date() }).where(and(eq(testGenerationQuestions.id, questionId), eq(testGenerationQuestions.jobId, id)))
     }
-    transaction.update(snapshot.ref, {
-      status: 'publishing',
-      publishingTestId: current?.publishingTestId || reservedTestId,
-      updatedAt: FieldValue.serverTimestamp(),
-    })
   })
+}
 
-  job = (await loadGenerationJob(jobId)) || job
-  const testId = String((job as GenerationJob & { publishingTestId?: string }).publishingTestId || reservedTestId)
-  const testRef = adminDb.collection('tests').doc(testId)
-  const batch = adminDb.batch()
-  let totalMarks = 0
-
-  approved.forEach((item, position) => {
-    const questionRef = adminDb.collection('questions').doc()
-    const keyRef = adminDb.collection('questionKeys').doc(questionRef.id)
-    const question = item.data
-    totalMarks += question.marks
-    const common = {
-      prompt: question.prompt,
-      kind: question.kind,
-      createdBy: job.ownerId,
-      visibility: input.visibility === 'public' ? 'public' : 'private',
-      ...(input.visibility === 'public' ? {} : { organisationId: job.ownerId }),
-      generationJobId: job.id,
-      topic: question.topic,
-      difficulty: question.difficulty,
-      revision: 1,
-      archivedAt: null,
-      createdAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-      schemaVersion: 3,
+export async function publishGenerationJob(id: string, user: ServerUser, input: unknown) {
+  const job = await requireGenerationJob(id, user)
+  if (job.status !== 'review') throw Object.assign(new Error('This draft is not ready to publish.'), { status: 409 })
+  const body = z.object({
+    examId: z.string().uuid(),
+    categoryName: z.string().trim().min(1).max(160),
+    title: z.string().trim().min(1).max(240),
+    description: z.string().max(10_000).default(''),
+    durationMinutes: z.number().int().min(1).max(1_440).default(30),
+    visibility: z.enum(['public', 'private', 'assigned']).default('private'),
+  }).parse(input)
+  const generated = await listGeneratedQuestions(id)
+  const accepted = generated.filter(item => item.reviewStatus === 'accepted')
+  if (!accepted.length) throw Object.assign(new Error('Accept at least one generated question.'), { status: 409 })
+  const repairDefaults = await generatedMcqRepairDefaults(job)
+  const testId = await database().transaction(async tx => {
+    const normalizedName = normalizeExamKey(body.categoryName)
+    let category = (await tx.select().from(categories).where(and(
+      eq(categories.organizationId, job.organizationId),
+      eq(categories.examId, body.examId),
+      eq(categories.normalizedName, normalizedName),
+    )).limit(1))[0]
+    if (!category) [category] = await tx.insert(categories).values({ organizationId: job.organizationId, examId: body.examId, name: body.categoryName, normalizedName, createdBy: user.uid }).returning()
+    const contents = accepted.map(item => repairGeneratedMcqContent(item.content, {
+      ...repairDefaults,
+      id: item.candidateKey,
+    }))
+    for (const [index, item] of accepted.entries()) {
+      await tx.update(testGenerationQuestions).set({
+        content: contents[index],
+        updatedAt: new Date(),
+      }).where(eq(testGenerationQuestions.id, item.id))
     }
-    batch.set(questionRef, question.kind === 'mcq'
-      ? { ...common, options: question.options, format: 'plain' }
-      : { ...common, format: 'plain' })
-    batch.set(keyRef, question.kind === 'mcq'
-      ? {
-          kind: 'mcq',
-          correctAnswer: question.correctAnswer,
-          explanation: question.explanation,
-          answerOrigin: question.answerOrigin,
-          sourceReferences: question.sourceReferences,
-          generationJobId: job.id,
-          updatedAt: FieldValue.serverTimestamp(),
-        }
-      : {
-          kind: 'short_answer',
-          modelAnswer: question.modelAnswer,
-          rubric: question.rubric,
-          answerOrigin: question.answerOrigin,
-          sourceReferences: question.sourceReferences,
-          generationJobId: job.id,
-          updatedAt: FieldValue.serverTimestamp(),
-        })
-    batch.set(testRef.collection('questions').doc(), {
-      questionId: questionRef.id,
-      position,
-      marks: question.marks,
-      mode: 'linked',
-    })
-    if (item.verificationStatus === 'unsupported') {
-      batch.update(item.reference, {
-        unsupportedOverrideApproved: true,
-        unsupportedOverrideApprovedBy: item.reviewedBy || user.uid,
-        unsupportedOverridePublishedBy: user.uid,
-        unsupportedOverridePublishedAt: FieldValue.serverTimestamp(),
-        updatedAt: FieldValue.serverTimestamp(),
+    const [test] = await tx.insert(tests).values({
+      organizationId: job.organizationId,
+      examId: body.examId,
+      categoryId: category.id,
+      createdBy: user.uid,
+      title: body.title,
+      description: body.description,
+      durationMinutes: body.durationMinutes,
+      visibility: body.visibility,
+      published: true,
+      publishedAt: new Date(),
+      origin: 'ai_generated',
+      generationJobId: id,
+      questionCount: contents.length,
+      totalMarks: contents.reduce((sum, item) => sum + item.marks, 0),
+    }).returning()
+    for (const [position, content] of contents.entries()) {
+      const [question] = await tx.insert(questions).values({
+        organizationId: job.organizationId,
+        createdBy: user.uid,
+        kind: content.kind,
+        visibility: body.visibility,
+        prompt: content.prompt,
+        options: content.options,
+      }).returning()
+      await tx.insert(questionKeys).values({
+        questionId: question.id,
+        correctAnswer: content.correctAnswer,
+        explanation: content.explanation,
+        answerOrigin: content.answerOrigin,
+        sourceReferences: content.sourceReferences,
       })
+      await tx.insert(testQuestions).values({ testId: test.id, questionId: question.id, position, marks: content.marks, snapshot: content })
     }
+    await tx.update(testGenerationJobs).set({ status: 'published', publishedTestId: test.id, updatedAt: new Date() }).where(eq(testGenerationJobs.id, id))
+    return test.id
   })
-
-  const examData = exam.data()!
-  const categoryData = category.data()!
-  batch.set(testRef, {
-    title: input.title,
-    description: input.description,
-    exam: examData.name,
-    examAlias: examData.primaryAlias || examData.name,
-    examId: exam.id,
-    category: categoryData.name,
-    categoryId: category.id,
-    durationMinutes: input.durationMinutes,
-    visibility: input.visibility,
-    ...(input.visibility === 'public' ? {} : { organisationId: job.ownerId }),
-    questionCount: approved.length,
-    totalMarks,
-    createdBy: job.ownerId,
-    createdAt: FieldValue.serverTimestamp(),
-    published: true,
-    publishedAt: FieldValue.serverTimestamp(),
-    deletedAt: null,
-    schemaVersion: 3,
-    origin: 'ai_generated',
-    generationJobId: job.id,
-    publishedBy: user.uid,
-  })
-  batch.update(jobReference(jobId), {
-    status: 'published',
-    publishedTestId: testId,
-    publishedBy: user.uid,
-    publishedAt: FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp(),
-  })
-  await batch.commit()
   return testId
+}
+
+export async function cancelGenerationJob(id: string, user: ServerUser) {
+  await requireGenerationJob(id, user)
+  await database().update(testGenerationJobs).set({ status: 'cancelled', updatedAt: new Date() }).where(eq(testGenerationJobs.id, id))
 }

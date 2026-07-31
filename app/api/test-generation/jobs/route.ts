@@ -1,60 +1,29 @@
+import { desc, eq } from 'drizzle-orm'
+import { testGenerationJobs } from '@/db/schema'
 import { errorResponse, requireRole } from '@/lib/admin-api'
-import { adminDb } from '@/lib/firebase-admin'
+import { database } from '@/lib/db'
 import { createGenerationJob } from '@/lib/test-generation/service'
 
-export const runtime = 'nodejs'
-
-function enabled() {
-  return process.env.AI_TEST_GENERATION_ENABLED !== 'false'
-}
-
-function timestamp(value: unknown) {
-  return value && typeof value === 'object' && 'toDate' in value
-    ? (value as { toDate: () => Date }).toDate().toISOString()
-    : null
-}
-
 export async function GET(request: Request) {
-  const auth = await requireRole(request, ['organisation', 'admin'])
+  const auth = await requireRole(request, ['organisation', 'admin', 'user'])
   if ('error' in auth) return auth.error
   try {
-    const query = auth.user.role === 'admin'
-      ? adminDb.collection('testGenerationJobs').limit(100)
-      : adminDb.collection('testGenerationJobs').where('ownerId', '==', auth.user.uid).limit(100)
-    const snapshot = await query.get()
-    const jobs = snapshot.docs
-      .map(item => {
-        const data = item.data()
-        return {
-          id: item.id,
-          ownerId: data.ownerId,
-          status: data.status,
-          subject: data.analysis?.subject || '',
-          titleSuggestion: data.titleSuggestion || '',
-          publishedTestId: data.publishedTestId || null,
-          createdAt: timestamp(data.createdAt),
-          updatedAt: timestamp(data.updatedAt),
-        }
-      })
-      .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))
-    return Response.json({ jobs, enabled: enabled() })
+    const rows = await database().select().from(testGenerationJobs)
+      .where(auth.user.globalRole === 'admin' ? undefined : auth.user.organizationId ? eq(testGenerationJobs.organizationId, auth.user.organizationId) : eq(testGenerationJobs.createdBy, auth.user.uid))
+      .orderBy(desc(testGenerationJobs.updatedAt)).limit(100)
+    return Response.json({ jobs: rows.map(item => ({ ...item, ownerId: item.organizationId, subject: (item.analysis as { subject?: string } | null)?.subject || '', createdAt: item.createdAt.toISOString(), updatedAt: item.updatedAt.toISOString() })), enabled: process.env.AI_TEST_GENERATION_ENABLED !== 'false' })
   } catch (error) {
     return errorResponse(error, 'Unable to load AI test drafts.')
   }
 }
 
 export async function POST(request: Request) {
-  const auth = await requireRole(request, ['organisation'])
+  const auth = await requireRole(request, ['organisation', 'user'])
   if ('error' in auth) return auth.error
-  if (!enabled()) return Response.json({ error: 'AI test generation is currently disabled.' }, { status: 503 })
+  if (process.env.AI_TEST_GENERATION_ENABLED === 'false') return Response.json({ error: 'AI test generation is disabled.' }, { status: 503 })
   try {
-    return Response.json({
-      jobId: await createGenerationJob(auth.user),
-      storagePrefix: `test-generation-sources/${auth.user.uid}`,
-    }, { status: 201 })
+    return Response.json({ jobId: await createGenerationJob(auth.user) }, { status: 201 })
   } catch (error) {
-    const status = Number((error as { status?: unknown })?.status) || 500
-    if (status !== 500) return Response.json({ error: (error as Error).message }, { status })
     return errorResponse(error, 'Unable to create an AI test draft.')
   }
 }

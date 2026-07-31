@@ -1,65 +1,82 @@
-import { errorResponse, requireRole } from '@/lib/admin-api'
-import { adminDb, FieldValue } from '@/lib/firebase-admin'
-import { timetableInputSchema } from '@/lib/timetable-schema'
-import { membershipsForUser } from '@/lib/attendance-api'
+import { eq, inArray } from 'drizzle-orm'
+import { z } from 'zod'
+import {
+  organizationGroupMembers,
+  timetableVersionGroups,
+  timetableVersionUsers,
+  timetableVersions,
+  timetables,
+} from '@/db/schema'
+import { authenticateRequest, errorResponse } from '@/lib/admin-api'
+import { database } from '@/lib/db'
+import { canAdministerOrganization } from '@/lib/services/access'
+import { saveTimetable, serializeTimetables } from '@/lib/services/timetables'
 
-export const runtime = 'nodejs'
+const payloadSchema = z.object({
+  organizationId: z.string().uuid(),
+  name: z.string().trim().min(1).max(240),
+  effectiveFrom: z.string().date(),
+  effectiveTo: z.string().date(),
+  timeZone: z.string().min(1).max(100).default('Asia/Kolkata'),
+  selectedUserIds: z.array(z.string().min(1)).max(1_000).default([]),
+  selectedGroupIds: z.array(z.string().uuid()).max(100).default([]),
+  entries: z.array(z.object({
+    subject: z.string().trim().min(1).max(240),
+    weekdays: z.array(z.number().int().min(0).max(6)).min(1),
+    startTime: z.string().regex(/^\d{2}:\d{2}/),
+    endTime: z.string().regex(/^\d{2}:\d{2}/),
+    teacherUserId: z.string().nullable().optional(),
+    teacher: z.string().max(160).optional(),
+    location: z.string().max(240).optional(),
+    meetingUrl: z.string().max(500).optional(),
+    notes: z.string().max(5_000).optional(),
+  })).min(1).max(500),
+})
 
 export async function GET(request: Request) {
-  const auth = await requireRole(request, ['user', 'organisation'])
+  const auth = await authenticateRequest(request)
   if ('error' in auth) return auth.error
   try {
-    let source: FirebaseFirestore.Query = adminDb.collection('timetables')
-    let mode: 'organisation' | 'teacher' | 'student'
-    if (auth.user.role === 'organisation') {
-      mode = 'organisation'
-      source = source.where('organisationId', '==', auth.user.uid)
+    const db = database()
+    let items
+    let includeDrafts = false
+    if (auth.user.globalRole === 'admin') {
+      items = await db.select().from(timetables)
+      includeDrafts = true
+    } else if (auth.user.organizationId && auth.user.membershipRole === 'owner') {
+      items = await db.select().from(timetables).where(eq(timetables.organizationId, auth.user.organizationId))
+      includeDrafts = true
+    } else if (auth.user.organizationId && auth.user.membershipRole === 'teacher') {
+      items = await db.select().from(timetables).where(eq(timetables.organizationId, auth.user.organizationId))
     } else {
-      const teacherMemberships = await membershipsForUser(auth.user.uid, 'teacher')
-      mode = teacherMemberships.length ? 'teacher' : 'student'
-      source = teacherMemberships.length
-        ? source.where('teacherUserIds', 'array-contains', auth.user.uid)
-        : source.where('assignedUserIds', 'array-contains', auth.user.uid)
+      const directVersions = await db.select({ id: timetableVersions.id, timetableId: timetableVersions.timetableId }).from(timetableVersions)
+        .leftJoin(timetableVersionUsers, eq(timetableVersionUsers.versionId, timetableVersions.id))
+        .where(eq(timetableVersionUsers.userId, auth.user.uid))
+      const groupIds = (await db.select().from(organizationGroupMembers).where(eq(organizationGroupMembers.userId, auth.user.uid))).map(item => item.groupId)
+      const groupVersions = groupIds.length ? await db.select({
+        timetableId: timetableVersions.timetableId,
+      }).from(timetableVersionGroups)
+        .innerJoin(timetableVersions, eq(timetableVersions.id, timetableVersionGroups.versionId))
+        .where(inArray(timetableVersionGroups.groupId, groupIds)) : []
+      const ids = [...new Set([...directVersions.map(item => item.timetableId), ...groupVersions.map(item => item.timetableId)])]
+      items = ids.length ? await db.select().from(timetables).where(inArray(timetables.id, ids)) : []
     }
-    const snapshot = await source.get()
-    return Response.json({
-      mode,
-      timetables: snapshot.docs.map(document => ({
-        id: document.id,
-        ...document.data(),
-        publishedAt: document.data().publishedAt?.toDate?.().toISOString() || null,
-        archivedAt: document.data().archivedAt?.toDate?.().toISOString() || null,
-        createdAt: document.data().createdAt?.toDate?.().toISOString() || null,
-        updatedAt: document.data().updatedAt?.toDate?.().toISOString() || null,
-      })),
-    })
+    return Response.json({ items: await serializeTimetables(items, { includeDrafts }), nextCursor: null })
   } catch (error) {
-    return errorResponse(error, 'Unable to load published timetables.')
+    return errorResponse(error, 'Unable to load timetables.')
   }
 }
 
 export async function POST(request: Request) {
-  const auth = await requireRole(request, ['organisation'])
+  const auth = await authenticateRequest(request)
   if ('error' in auth) return auth.error
   try {
-    const body = await request.json().catch(() => null)
-    const parsed = timetableInputSchema.safeParse(body)
-    if (!parsed.success) {
-      return Response.json({ error: parsed.error.issues[0]?.message || 'Invalid timetable details.', issues: parsed.error.issues }, { status: 400 })
-    }
-    const reference = adminDb.collection('timetableDrafts').doc()
-    await reference.create({
-      ...parsed.data,
-      organisationId: auth.user.uid,
-      organisationName: auth.user.name,
-      timeZone: process.env.APP_TIME_ZONE || 'Asia/Kolkata',
-      createdBy: auth.user.uid,
-      publishedRevision: 0,
-      createdAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-    })
-    return Response.json({ timetableId: reference.id }, { status: 201 })
+    const parsed = payloadSchema.safeParse(await request.json())
+    if (!parsed.success) return Response.json({ error: 'Invalid timetable.', issues: parsed.error.issues }, { status: 400 })
+    if (!(await canAdministerOrganization(auth.user, parsed.data.organizationId))) return Response.json({ error: 'Organization owner access required.' }, { status: 403 })
+    const result = await saveTimetable(parsed.data, parsed.data.organizationId, auth.user.uid)
+    return Response.json(result, { status: 201 })
   } catch (error) {
-    return errorResponse(error, 'Unable to create the timetable draft.')
+    return errorResponse(error, 'Unable to create timetable.')
   }
 }

@@ -1,0 +1,8 @@
+[
+  {
+    "origin": ["*"],
+    "method": ["GET", "HEAD", "PUT", "OPTIONS"],
+    "responseHeader": ["Content-Type", "ETag", "x-goog-resumable"],
+    "maxAgeSeconds": 3600
+  }
+]

@@ -1,38 +1,20 @@
-import { errorResponse, requireRole } from '@/lib/admin-api'
-import { adminDb, Timestamp } from '@/lib/firebase-admin'
-
-export const runtime = 'nodejs'
-export const maxDuration = 60
+import { eq } from 'drizzle-orm'
+import { timetables } from '@/db/schema'
+import { authenticateRequest, errorResponse } from '@/lib/admin-api'
+import { database } from '@/lib/db'
+import { canAdministerOrganization } from '@/lib/services/access'
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
-  const auth = await requireRole(request, ['organisation'])
+  const auth = await authenticateRequest(request)
   if ('error' in auth) return auth.error
   try {
     const { id } = await context.params
-    const reference = adminDb.collection('timetables').doc(id)
-    const initial = await reference.get()
-    if (!initial.exists) return Response.json({ error: 'Published timetable not found.' }, { status: 404 })
-    if (initial.data()?.organisationId !== auth.user.uid) {
-      return Response.json({ error: 'You cannot archive this timetable.' }, { status: 403 })
-    }
-    const result = await adminDb.runTransaction(async transaction => {
-      const snapshot = await transaction.get(reference)
-      if (!snapshot.exists) throw new Error('Published timetable not found.')
-      const timetable = snapshot.data()!
-      if (timetable.organisationId !== auth.user.uid) throw new Error('You cannot archive this timetable.')
-      if (timetable.status === 'archived') return { changed: false }
-      const revision = Number(timetable.revision || 0) + 1
-      const now = Timestamp.now()
-      transaction.update(reference, {
-        status: 'archived',
-        revision,
-        archivedAt: now,
-        updatedAt: now,
-      })
-      return { changed: true }
-    })
-    return Response.json({ timetableId: id, changed: result.changed })
+    const item = (await database().select().from(timetables).where(eq(timetables.id, id)).limit(1))[0]
+    if (!item) return Response.json({ error: 'Timetable not found.' }, { status: 404 })
+    if (!(await canAdministerOrganization(auth.user, item.organizationId))) return Response.json({ error: 'Organization owner access required.' }, { status: 403 })
+    await database().update(timetables).set({ status: 'archived', archivedAt: new Date(), updatedAt: new Date() }).where(eq(timetables.id, id))
+    return Response.json({ ok: true })
   } catch (error) {
-    return errorResponse(error, 'Unable to archive the timetable.')
+    return errorResponse(error, 'Unable to archive timetable.')
   }
 }

@@ -10,6 +10,7 @@ import {
   SourceReferenceSchema,
   VerificationSchema,
   canTransitionGeneration,
+  repairGeneratedMcqContent,
 } from '../lib/test-generation/schema'
 
 const reference = {
@@ -97,6 +98,37 @@ test('generated MCQs have four distinct options and valid inference labels', () 
     descriptionSuggestion: '',
     questions: [mcq('q1'), { ...mcq('q2'), options: ['A', 'A', 'B', 'C'] }, mcq('q3'), mcq('q4'), mcq('q5')],
   }).success, false)
+})
+
+test('damaged edited MCQs recover required generated metadata before publication', () => {
+  assert.deepEqual(
+    repairGeneratedMcqContent({
+      kind: 'mcq',
+      prompt: 'Which organelle is associated with cellular respiration?',
+      options: ['Mitochondrion', 'Ribosome', 'Golgi apparatus', 'Nucleus'],
+      correctAnswer: 0,
+      explanation: 'The mitochondrion releases usable energy.',
+      marks: 1,
+    }, {
+      id: 'q1',
+      topic: 'Cell biology',
+      difficulty: 'medium',
+      sourceReferences: [reference],
+    }),
+    {
+      id: 'q1',
+      kind: 'mcq',
+      prompt: 'Which organelle is associated with cellular respiration?',
+      options: ['Mitochondrion', 'Ribosome', 'Golgi apparatus', 'Nucleus'],
+      correctAnswer: 0,
+      explanation: 'The mitochondrion releases usable energy.',
+      marks: 1,
+      topic: 'Cell biology',
+      difficulty: 'medium',
+      answerOrigin: 'model_inferred',
+      sourceReferences: [reference],
+    },
+  )
 })
 
 test('the active generation response accepts MCQs only', () => {

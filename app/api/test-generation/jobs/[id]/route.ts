@@ -1,57 +1,46 @@
+import { eq } from 'drizzle-orm'
+import { files, testGenerationSources } from '@/db/schema'
 import { errorResponse, requireRole } from '@/lib/admin-api'
-import {
-  cancelGenerationJob,
-  listGeneratedQuestions,
-  requireGenerationJob,
-} from '@/lib/test-generation/service'
+import { database } from '@/lib/db'
+import { cancelGenerationJob, listGeneratedQuestions, reconcileGenerationJob } from '@/lib/test-generation/service'
 
-export const runtime = 'nodejs'
-
-function timestamp(value: unknown) {
-  return value && typeof value === 'object' && 'toDate' in value
-    ? (value as { toDate: () => Date }).toDate().toISOString()
-    : null
-}
-
-export async function GET(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const auth = await requireRole(request, ['organisation', 'admin'])
+export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
+  const auth = await requireRole(request, ['organisation', 'admin', 'user'])
   if ('error' in auth) return auth.error
   try {
-    const { id } = await params
-    const job = await requireGenerationJob(id, auth.user)
+    const job = await reconcileGenerationJob((await context.params).id, auth.user)
+    const sources = await database().select({
+      id: files.id,
+      name: files.name,
+      path: files.path,
+      mimeType: files.contentType,
+      size: files.size,
+    }).from(testGenerationSources)
+      .innerJoin(files, eq(files.id, testGenerationSources.fileId))
+      .where(eq(testGenerationSources.jobId, job.id))
+      .orderBy(testGenerationSources.position)
     return Response.json({
       job: {
         ...job,
-        openaiFiles: undefined,
-        activeResponseId: undefined,
-        createdAt: timestamp((job as unknown as Record<string, unknown>).createdAt),
-        updatedAt: timestamp((job as unknown as Record<string, unknown>).updatedAt),
+        ownerId: job.organizationId,
+        sources,
+        createdAt: job.createdAt.toISOString(),
+        updatedAt: job.updatedAt.toISOString(),
       },
-      questions: await listGeneratedQuestions(id),
+      questions: await listGeneratedQuestions(job.id),
     })
   } catch (error) {
-    const status = Number((error as { status?: unknown })?.status) || 500
-    if (status !== 500) return Response.json({ error: (error as Error).message }, { status })
     return errorResponse(error, 'Unable to load this AI test draft.')
   }
 }
 
-export async function DELETE(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const auth = await requireRole(request, ['organisation', 'admin'])
+export async function DELETE(request: Request, context: { params: Promise<{ id: string }> }) {
+  const auth = await requireRole(request, ['organisation', 'admin', 'user'])
   if ('error' in auth) return auth.error
   try {
-    const { id } = await params
-    await cancelGenerationJob(id, auth.user)
+    await cancelGenerationJob((await context.params).id, auth.user)
     return Response.json({ ok: true })
   } catch (error) {
-    const status = Number((error as { status?: unknown })?.status) || 500
-    if (status !== 500) return Response.json({ error: (error as Error).message }, { status })
     return errorResponse(error, 'Unable to discard this AI test draft.')
   }
 }

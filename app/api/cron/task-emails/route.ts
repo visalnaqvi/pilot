@@ -1,6 +1,5 @@
 import { timingSafeEqual } from 'node:crypto'
-import { processDueTaskEmailJobs } from '@/lib/task-email-worker'
-import { processDueTimetableEmailJobs } from '@/lib/timetable-email-worker'
+import { processDueEmailJobs } from '@/lib/email-worker'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -19,11 +18,7 @@ export async function GET(request: Request) {
     return Response.json({ error: 'Unauthorized.' }, { status: 401 })
   }
   try {
-    const [tasks, timetables] = await Promise.all([
-      processDueTaskEmailJobs(),
-      processDueTimetableEmailJobs(),
-    ])
-    return Response.json({ tasks, timetables })
+    return Response.json(await processDueEmailJobs())
   } catch (error) {
     console.error('Email cron failed.', error)
     return Response.json({ error: 'Email processing failed.' }, { status: 500 })

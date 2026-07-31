@@ -1,19 +1,22 @@
 'use client'
 
-import { useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useAuth } from './auth-context'
 import type {
   ExamCatalogEntry,
   ExamResolution,
   ExamSelectionStatus,
 } from '@/lib/exam-catalog'
+import { authenticatedFetch } from '@/lib/authenticated-fetch'
 
 export function ExamResolver({
   autoFocus = false,
+  autoResolveInitialName = false,
   initialName = '',
   onResolved,
 }: {
   autoFocus?: boolean
+  autoResolveInitialName?: boolean
   initialName?: string
   onResolved: (exam: ExamCatalogEntry, status: ExamSelectionStatus) => void
 }) {
@@ -21,19 +24,16 @@ export function ExamResolver({
   const [name, setName] = useState(initialName)
   const [suggestions, setSuggestions] = useState<ExamCatalogEntry[]>([])
   const [proposal, setProposal] = useState<ExamCatalogEntry | null>(null)
+  const [proposalSource, setProposalSource] = useState<'ai' | 'input'>('input')
   const [resolving, setResolving] = useState(false)
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
+  const initialResolutionStarted = useRef(false)
 
-  async function requestResolution(body: Record<string, unknown>) {
+  const requestResolution = useCallback(async (body: Record<string, unknown>) => {
     if (!user) throw new Error('Sign in before adding an exam.')
-    const token = await user.getIdToken()
-    const response = await fetch('/api/exams/resolve', {
+    const response = await authenticatedFetch(user, '/api/exams/resolve', {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${token}`,
-      },
       body: JSON.stringify(body),
     })
     const result = await response.json() as ExamResolution | { error?: string }
@@ -41,9 +41,9 @@ export function ExamResolver({
       throw new Error('error' in result && result.error ? result.error : 'Unable to resolve this exam.')
     }
     return result
-  }
+  }, [user])
 
-  function showResolution(result: ExamResolution) {
+  const showResolution = useCallback((result: ExamResolution) => {
     if (result.status === 'matches') {
       setProposal(null)
       setSuggestions(result.exams)
@@ -52,12 +52,13 @@ export function ExamResolver({
     if (result.status === 'proposed') {
       setSuggestions([])
       setProposal(result.exam)
+      setProposalSource(result.source || 'input')
       return
     }
     onResolved(result.exam, result.status)
-  }
+  }, [onResolved])
 
-  async function resolveExam() {
+  const resolveExam = useCallback(async () => {
     const examName = name.trim()
     if (!examName) {
       setError('Enter a valid exam name.')
@@ -75,7 +76,14 @@ export function ExamResolver({
     } finally {
       setResolving(false)
     }
-  }
+  }, [name, requestResolution, showResolution])
+
+  useEffect(() => {
+    if (!autoResolveInitialName || !user || !initialName.trim() || initialResolutionStarted.current) return
+    initialResolutionStarted.current = true
+    const timer = window.setTimeout(() => void resolveExam(), 0)
+    return () => window.clearTimeout(timer)
+  }, [autoResolveInitialName, initialName, resolveExam, user])
 
   async function createExam() {
     if (!proposal) return
@@ -155,10 +163,10 @@ export function ExamResolver({
       )}
       {proposal && (
         <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
-          <p className="text-xs font-black uppercase tracking-wide text-emerald-700">New exam proposal</p>
+          <p className="text-xs font-black uppercase tracking-wide text-emerald-700">{proposalSource === 'ai' ? 'Suggested catalog exam' : 'New exam proposal'}</p>
           <p className="mt-2 text-lg font-black text-slate-950">{proposal.name}</p>
           {proposal.primaryAlias && proposal.primaryAlias !== proposal.name && <p className="mt-1 text-sm text-slate-600">Display alias: {proposal.primaryAlias}</p>}
-          <p className="mt-3 text-sm leading-6 text-emerald-900">No existing exam was selected. Review this name, then confirm before adding it to the catalog.</p>
+          <p className="mt-3 text-sm leading-6 text-emerald-900">{proposalSource === 'ai' ? 'This canonical name was suggested from your search. Review it, then confirm before adding it to the catalog.' : 'No existing exam was selected. Review this name, then confirm before adding it to the catalog.'}</p>
           <div className="mt-4 flex flex-wrap gap-2">
             <button type="button" disabled={creating} onClick={() => void createExam()} className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-bold text-white hover:bg-emerald-800 disabled:opacity-50">{creating ? 'Creating…' : 'Create exam'}</button>
             <button type="button" disabled={creating} onClick={() => setProposal(null)} className="rounded-lg border border-emerald-300 bg-white px-4 py-2 text-sm font-bold text-emerald-800 hover:bg-emerald-100 disabled:opacity-50">Change search</button>

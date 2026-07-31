@@ -2,23 +2,21 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { collection, onSnapshot, query, where } from 'firebase/firestore'
-import { db } from '@/lib/firebase'
+import { authenticatedFetch } from '@/lib/authenticated-fetch'
 import { useAuth } from './auth-context'
 
-type DateValue = { toDate: () => Date }
 type JoinRequest = {
   id: string
   initiatedBy?: 'organisation' | 'user'
   status: 'pending' | 'accepted' | 'declined'
-  createdAt?: DateValue
+  createdAt?: string
 }
 
-const requestToken = (request: JoinRequest) => `${request.id}:${request.createdAt?.toDate().getTime() || 0}`
+const requestToken = (request: JoinRequest) => `${request.id}:${request.createdAt ? new Date(request.createdAt).getTime() : 0}`
 
 export function PendingJoinRequestsBanner() {
   const { user, profile } = useAuth()
-  const organisationId = profile?.role === 'organisation' ? profile.uid : ''
+  const organisationId = profile?.role === 'organisation' ? profile.organizationId || '' : ''
   const storageKey = `mockpilot-dismissed-join-requests:${organisationId}`
   const [requests, setRequests] = useState<JoinRequest[]>([])
   const [dismissedTokens, setDismissedTokens] = useState<string[]>(() => {
@@ -33,12 +31,18 @@ export function PendingJoinRequestsBanner() {
 
   useEffect(() => {
     if (!user || !organisationId) return
-    return onSnapshot(
-      query(collection(db, 'organisationInvites'), where('organisationId', '==', organisationId)),
-      snapshot => setRequests(snapshot.docs
-        .map(item => ({ id: item.id, ...item.data() }) as JoinRequest)
-        .filter(request => request.status === 'pending' && request.initiatedBy === 'user')),
-    )
+    let active = true
+    void authenticatedFetch(user, `/api/memberships?organizationId=${organisationId}`, { cache: 'no-store' }).then(async response => {
+      const payload = await response.json()
+      if (!response.ok) return
+      if (active) setRequests((payload.items || []).map((item: { organizationId: string; userId: string; status: JoinRequest['status']; initiatedBy?: string; createdAt?: string }) => ({
+        id: `${item.organizationId}:${item.userId}`,
+        initiatedBy: item.initiatedBy === item.userId ? 'user' : 'organisation',
+        status: item.status,
+        createdAt: item.createdAt,
+      })).filter((request: JoinRequest) => request.status === 'pending' && request.initiatedBy === 'user'))
+    })
+    return () => { active = false }
   }, [organisationId, user])
 
   const currentTokens = useMemo(() => requests.map(requestToken), [requests])

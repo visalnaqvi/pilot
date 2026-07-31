@@ -98,6 +98,33 @@ export const GeneratedMcqSchema = GeneratedQuestionBaseSchema.extend({
   explanation: z.string().min(1).max(4000),
 })
 
+export function repairGeneratedMcqContent(
+  content: unknown,
+  defaults: {
+    id: string
+    topic: string
+    difficulty: 'easy' | 'medium' | 'hard'
+    sourceReferences: SourceReference[]
+  },
+) {
+  const raw = content && typeof content === 'object' && !Array.isArray(content)
+    ? content as Record<string, unknown>
+    : {}
+  const sourceReferences = GeneratedQuestionBaseSchema.shape.sourceReferences.safeParse(raw.sourceReferences)
+  return GeneratedMcqSchema.parse({
+    ...raw,
+    id: typeof raw.id === 'string' && raw.id.trim() ? raw.id : defaults.id,
+    topic: typeof raw.topic === 'string' && raw.topic.trim() ? raw.topic : defaults.topic,
+    difficulty: raw.difficulty === 'easy' || raw.difficulty === 'medium' || raw.difficulty === 'hard'
+      ? raw.difficulty
+      : defaults.difficulty,
+    answerOrigin: raw.answerOrigin === 'source_supported' || raw.answerOrigin === 'model_inferred'
+      ? raw.answerOrigin
+      : 'model_inferred',
+    sourceReferences: sourceReferences.success ? sourceReferences.data : defaults.sourceReferences,
+  })
+}
+
 export const RubricCriterionSchema = z.object({
   criterion: z.string().min(1).max(800),
   marks: z.number().int().min(1).max(100),

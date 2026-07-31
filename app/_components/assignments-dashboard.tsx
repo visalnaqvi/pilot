@@ -6,12 +6,13 @@ import { SearchPicker } from './search-picker'
 import { paginate, Pagination } from './pagination'
 import type { MockTest, Submission } from './test-types'
 import { SubmissionAnswersModal } from './submission-answers-modal'
-import { attemptsForAssignment } from '@/lib/assignment-attempts'
 import { useTeacherOrganisations } from './use-teacher-organisations'
+import { WorkDataLoading } from './work-data-loading'
 
 type Member = { userId: string; userEmail: string }
 type Group = { id: string; name: string; members: Member[] }
-export type AssignmentBatch = { id: string; name: string; testId: string; testTitle: string; exam?: string; assignedBy: string; organisationId?: string; audienceName: string; assignedUserIds: string[]; assignedCount: number; maxAttempts?: number; startAt?: { toDate: () => Date }; deadline: { toDate: () => Date }; createdAt?: { toDate: () => Date } }
+type AssignmentRecipient = { userId: string; userEmail?: string; userName?: string; attemptsUsed?: number }
+export type AssignmentBatch = { id: string; name: string; testId: string; testTitle: string; exam?: string; assignedBy: string; organisationId?: string; audienceName: string; recipients: AssignmentRecipient[]; assignedCount: number; maxAttempts?: number; startAt?: { toDate: () => Date }; deadline: { toDate: () => Date }; createdAt?: { toDate: () => Date } }
 const score = (item: Submission) => item.totalMarks ? item.score / item.totalMarks * 100 : 0
 const assignmentUserDetails = new Map<string, { name: string; email: string; groups: string[] }>()
 const timestampValue = (value: unknown) => typeof value === 'string'
@@ -35,7 +36,7 @@ export function AssignmentsDashboard() {
   const allowed = role === 'admin' || role === 'organisation' || isTeacher
   const [selectedOrganisationId, setSelectedOrganisationId] = useState('')
   const organisationId = role === 'organisation'
-    ? user?.uid || ''
+    ? profile?.organizationId || ''
     : selectedOrganisationId || (teacherOrganisations.length === 1 ? teacherOrganisations[0].id : '')
   const [tests, setTests] = useState<MockTest[]>([])
   const [groups, setGroups] = useState<Group[]>([])
@@ -51,6 +52,7 @@ export function AssignmentsDashboard() {
   const [deadline, setDeadline] = useState('')
   const [maxAttempts, setMaxAttempts] = useState(1)
   const [message, setMessage] = useState('')
+  const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [page, setPage] = useState(1)
   const assignmentActionRef = useRef<HTMLButtonElement | null>(null)
@@ -91,16 +93,23 @@ export function AssignmentsDashboard() {
   }, [allowed, isTeacher, organisationId, user])
 
   useEffect(() => {
-    if (!user || !allowed || (isTeacher && !organisationId)) return
+    if (!user || teacherOrganisationsLoading) return
+    if (!allowed || (isTeacher && !organisationId)) {
+      queueMicrotask(() => setLoading(false))
+      return
+    }
     const controller = new AbortController()
     queueMicrotask(() => {
+      setLoading(true)
       void loadManagementData(controller.signal).catch(reason => {
         if (reason instanceof DOMException && reason.name === 'AbortError') return
         setMessage(reason instanceof Error ? reason.message : 'Unable to load assignments.')
+      }).finally(() => {
+        if (!controller.signal.aborted) setLoading(false)
       })
     })
     return () => controller.abort()
-  }, [allowed, isTeacher, loadManagementData, organisationId, user])
+  }, [allowed, isTeacher, loadManagementData, organisationId, teacherOrganisationsLoading, user])
   useEffect(() => { const openDatePicker = (event: MouseEvent) => { const input = event.target instanceof HTMLInputElement && event.target.type === 'datetime-local' ? event.target : null; input?.showPicker?.() }; document.addEventListener('click', openDatePicker); return () => document.removeEventListener('click', openDatePicker) }, [])
   useEffect(() => {
     const form = [...document.querySelectorAll('form')].find(item => item.querySelector('h2')?.textContent === 'Create Assignment')
@@ -158,8 +167,6 @@ export function AssignmentsDashboard() {
     if (!user || (role !== 'admin' && !organisationId) || !test || test.visibility !== 'assigned' || !name.trim() || !recipients.length || !startAt || !deadline || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start || end <= new Date() || !Number.isInteger(maxAttempts) || maxAttempts < 1) { setMessage('Select an institute, then enter a name, assigned test, recipient, valid date range, and at least one allowed attempt.'); return }
     setSaving(true); setMessage('')
     try {
-      const assignmentBatchId = crypto.randomUUID()
-      const taskId = crypto.randomUUID()
       const response = await fetch('/api/assignments', {
         method: 'POST',
         headers: {
@@ -167,9 +174,7 @@ export function AssignmentsDashboard() {
           authorization: `Bearer ${await user.getIdToken()}`,
         },
         body: JSON.stringify({
-          assignmentBatchId,
-          taskId,
-          organisationId: organisationId || undefined,
+          organizationId: organisationId,
           name: name.trim(),
           testId: test.id,
           targetType,
@@ -187,8 +192,9 @@ export function AssignmentsDashboard() {
       setName(''); setTestId(''); setTargetId(''); setStartAt(''); setDeadline(''); setMaxAttempts(1); setMessage('Assignment and task created.')
     } catch (reason) { setMessage(reason instanceof Error ? reason.message : 'Unable to create assignment.') } finally { setSaving(false) }
   }
-  if (teacherOrganisationsLoading) return <p className="text-slate-500">Checking teaching permissions…</p>
+  if (teacherOrganisationsLoading) return <WorkDataLoading label="assignments" />
   if (!allowed) return <section><h1 className="text-3xl font-black">Access denied</h1><p className="mt-3 text-slate-600">Only institute, teacher, and admin accounts can manage assignments.</p></section>
+  if (loading) return <WorkDataLoading label="assignments" />
   return <section><p className="text-sm font-bold tracking-widest text-indigo-600">ASSIGNMENTS</p><h1 className="mt-1 text-4xl font-black">Assignment management</h1><p className="mt-3 text-slate-600">Create test assignments and track all live and historical assignment results.</p><form onSubmit={create} className="relative mt-7 overflow-hidden rounded-2xl border border-slate-200 bg-white p-6 shadow-xl shadow-slate-200/70 sm:p-7"><div aria-hidden="true" className="pointer-events-none absolute -right-20 -top-20 h-64 w-64 rounded-full bg-indigo-50/70" /><div className="relative flex items-center gap-4 border-b border-slate-200 pb-6"><span className="grid h-14 w-14 place-items-center rounded-xl bg-indigo-50 text-indigo-600"><AssignmentIcon /></span><div><h2 className="text-2xl font-black tracking-tight text-slate-900">Create Assignment</h2><p className="mt-1 text-sm text-slate-600">Configure and assign an Assigned-mode test</p></div></div>{isTeacher && <div className="relative mt-7 max-w-sm"><FormLabel label="Institute" icon={<UsersIcon />}><select value={organisationId} onChange={event => { setSelectedOrganisationId(event.target.value); setTestId(''); setTargetId(''); setTests([]); setGroups([]); setUsers([]); setSubmissions([]); setAssignments([]) }} required className="assignment-input"><option value="">Select institute</option>{teacherOrganisations.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></FormLabel></div>}<div className="relative mt-7 grid gap-5 md:grid-cols-2 xl:grid-cols-4"><FormLabel label="Assignment name" icon={<DocumentIcon />}><input value={name} onChange={event => setName(event.target.value)} required placeholder="e.g. July mock" className="assignment-input" /></FormLabel><FormLabel label="Test" icon={<ClipboardIcon />}><select value={testId} onChange={event => setTestId(event.target.value)} required className="assignment-input"><option value="">Select an assigned test</option>{selectableTests.map(test => <option key={test.id} value={test.id}>{test.title}</option>)}</select></FormLabel><FormLabel label="Assign to" icon={<UsersIcon />}><select value={targetType} onChange={event => { setTargetType(event.target.value as 'group' | 'user'); setTargetId('') }} className="assignment-input"><option value="group">Batch</option><option value="user">Student</option></select></FormLabel><FormLabel label={targetType === 'group' ? 'Batch' : 'Student'} icon={<UsersIcon />}><select value={targetId} onChange={event => setTargetId(event.target.value)} required className="assignment-input"><option value="">Select {targetType}</option>{targetType === 'group' ? groups.map(group => <option key={group.id} value={group.id}>{group.name} ({group.members.length})</option>) : users.map(account => <option key={account.uid} value={account.uid}>{account.email}</option>)}</select></FormLabel></div><div className="relative mt-6 grid gap-5 md:grid-cols-3"><FormLabel label="Start date" icon={<CalendarIcon />}><input value={startAt} onChange={event => setStartAt(event.target.value)} type="datetime-local" required className="assignment-input" /></FormLabel><FormLabel label="End date" icon={<CalendarIcon />}><input value={deadline} onChange={event => setDeadline(event.target.value)} type="datetime-local" min={startAt || undefined} required className="assignment-input" /></FormLabel><FormLabel label="Attempts allowed" icon={<RetryIcon />}><input value={maxAttempts} onChange={event => setMaxAttempts(Number(event.target.value))} type="number" min="1" step="1" required className="assignment-input" /></FormLabel></div><div className="relative mt-6 flex gap-3 rounded-xl bg-indigo-50 px-5 py-4 text-sm text-slate-700"><span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-indigo-600 font-bold text-white">i</span><p><b className="text-slate-900">Please review all details before creating the assignment.</b><br />Students can access it only during this window and only for the configured number of attempts.</p></div><div className="relative mt-6 flex flex-wrap justify-end gap-3 border-t border-slate-200 pt-5"><button type="button" onClick={() => { setName(''); setTestId(''); setTargetType('group'); setTargetId(''); setStartAt(''); setDeadline(''); setMaxAttempts(1); setMessage('') }} className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">Cancel</button><button disabled={saving || (role !== 'admin' && !organisationId)} className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 disabled:opacity-50"><SendIcon />{saving ? 'Creating…' : 'Create assignment'}</button></div></form>{message && <p className="mt-5 rounded-xl bg-indigo-50 p-4 text-sm text-indigo-800">{message}</p>}<div className="mt-8"><h2 className="text-2xl font-black">All assignments</h2><p className="mt-1 text-sm text-slate-500">Browse assignments and open their result dashboards.</p><div className="mt-4 overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm"><AssignmentHeader />{visibleAssignments.items.map(item => <AssignmentRow key={item.id} assignment={item} submissions={submissions} open={() => setOpened(item)} />)}{!sorted.length && <p className="p-6 text-slate-500">No assignments have been created yet.</p>}<Pagination page={visibleAssignments.page} totalItems={sorted.length} onPageChange={setPage} itemLabel="assignments" /></div></div>{opened && <AssignmentModal assignment={opened} submissions={submissions} accounts={users} close={() => setOpened(null)} />}</section>
 }
 
@@ -205,7 +211,10 @@ function CalendarIcon() { return <svg viewBox="0 0 24 24" className="h-4 w-4" fi
 function RetryIcon() { return <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 7v5h-5" /><path d="M18.5 16a8 8 0 1 1 .8-7L20 12" /></svg> }
 function SendIcon() { return <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m22 2-7 20-4-9-9-4Z" /><path d="M22 2 11 13" /></svg> }
 function AssignmentHeader() { return <div className="min-w-[1020px] grid grid-cols-[1.3fr_1fr_1fr_.75fr_.8fr_.9fr_.7fr] gap-4 border-b border-slate-200 bg-slate-50 px-5 py-3 text-xs font-bold tracking-wide text-slate-500"><span>ASSIGNMENT</span><span>EXAM</span><span>TEST</span><span>ATTEMPTS ALLOWED</span><span>ATTEMPTED / ASSIGNED</span><span>AVERAGE SCORE</span><span>STATUS</span></div> }
-function attemptsFor(assignment: AssignmentBatch, submissions: Submission[]) { return attemptsForAssignment(assignment, submissions) }
+function attemptsFor(assignment: AssignmentBatch, submissions: Submission[]) {
+  const recipientIds = new Set(assignment.recipients.map(item => item.userId))
+  return submissions.filter(item => item.assignmentBatchId === assignment.id && item.testId === assignment.testId && recipientIds.has(item.userId))
+}
 function stateOf(assignment: AssignmentBatch, now = Date.now()): 'upcoming' | 'live' | 'ended' { const start = assignment.startAt?.toDate().getTime() || assignment.createdAt?.toDate().getTime() || 0; if (now < start) return 'upcoming'; return now <= assignment.deadline.toDate().getTime() ? 'live' : 'ended' }
 function AssignmentRow({ assignment, submissions, open }: { assignment: AssignmentBatch; submissions: Submission[]; open: () => void }) { const attempts = attemptsFor(assignment, submissions); const completed = new Set(attempts.map(item => item.userId)).size; const average = attempts.length ? attempts.reduce((sum, item) => sum + score(item), 0) / attempts.length : 0; return <button type="button" onClick={open} className="min-w-[1020px] grid grid-cols-[1.3fr_1fr_1fr_.75fr_.8fr_.9fr_.7fr] items-center gap-4 border-b border-slate-100 px-5 py-4 text-left hover:bg-indigo-50 last:border-0"><div><p className="font-bold">{assignment.name}</p><p className="mt-1 text-xs text-slate-500">{assignment.audienceName}</p></div><span className="text-sm">{assignment.exam || '—'}</span><span className="text-sm font-semibold">{assignment.testTitle}</span><span className="font-bold">{assignment.maxAttempts || 1}</span><span className="font-bold text-indigo-700">{completed}/{assignment.assignedCount}</span><span className="font-bold">{attempts.length ? `${Math.round(average)}%` : '—'}</span><Status state={stateOf(assignment)} /></button> }
 function Status({ state }: { state: 'upcoming' | 'live' | 'ended' }) { return <span className={`w-fit rounded-full px-2.5 py-1 text-xs font-bold ${state === 'live' ? 'assignment-live-shimmer bg-emerald-100 text-emerald-700' : state === 'upcoming' ? 'bg-sky-100 text-sky-700' : 'bg-slate-100 text-slate-600'}`}>{state === 'live' ? 'Live' : state === 'upcoming' ? 'Upcoming' : 'Ended'}</span> }
@@ -215,10 +224,10 @@ export function AssignmentModal({ assignment, submissions, accounts, close }: { 
   const [now, setNow] = useState(assignment.createdAt?.toDate().getTime() || assignment.deadline.toDate().getTime())
   useEffect(() => { const initial = window.setTimeout(() => setNow(Date.now()), 0); const timer = window.setInterval(() => setNow(Date.now()), 60_000); return () => { window.clearTimeout(initial); window.clearInterval(timer) } }, [])
   const attempts = attemptsFor(assignment, submissions)
-  const attemptedUsers = [...new Map(attempts.map(item => [item.userId, { id: item.userId, name: item.userName || accounts.find(account => account.uid === item.userId)?.name || item.userEmail || item.userId, email: item.userEmail || accounts.find(account => account.uid === item.userId)?.email || item.userId, attempts: attempts.filter(attempt => attempt.userId === item.userId) }])).values()].map(item => ({ ...item, average: item.attempts.reduce((sum, attempt) => sum + score(attempt), 0) / item.attempts.length, latest: item.attempts.slice().sort((a, b) => (b.submittedAt?.toDate().getTime() || 0) - (a.submittedAt?.toDate().getTime() || 0))[0] })).sort((a, b) => b.average - a.average)
+  const attemptedUsers = [...new Map(attempts.map(item => [item.userId, { id: item.userId, name: item.userName || accounts.find(account => account.uid === item.userId)?.name || item.userEmail || item.userId, email: item.userEmail || accounts.find(account => account.uid === item.userId)?.email || item.userId, attempts: attempts.filter(attempt => attempt.userId === item.userId) }])).values()].map(item => ({ ...item, average: item.attempts.reduce((sum, attempt) => sum + score(attempt), 0) / item.attempts.length, latest: item.attempts.slice().sort((a, b) => (typeof b.submittedAt === 'string' ? new Date(b.submittedAt).getTime() : b.submittedAt?.toDate().getTime() || 0) - (typeof a.submittedAt === 'string' ? new Date(a.submittedAt).getTime() : a.submittedAt?.toDate().getTime() || 0))[0] })).sort((a, b) => b.average - a.average)
   const completed = attemptedUsers.length
   const average = attempts.length ? attempts.reduce((sum, item) => sum + score(item), 0) / attempts.length : 0
-  const pendingUsers = assignment.assignedUserIds.filter(id => !attemptedUsers.some(item => item.id === id)).map(id => ({ id, name: accounts.find(account => account.uid === id)?.name || accounts.find(account => account.uid === id)?.email || id, email: accounts.find(account => account.uid === id)?.email || id }))
+  const pendingUsers = assignment.recipients.filter(recipient => !attemptedUsers.some(item => item.id === recipient.userId)).map(recipient => ({ id: recipient.userId, name: recipient.userName || accounts.find(account => account.uid === recipient.userId)?.name || recipient.userEmail || recipient.userId, email: recipient.userEmail || accounts.find(account => account.uid === recipient.userId)?.email || recipient.userId }))
   const end = assignment.deadline.toDate().getTime(); const start = assignment.startAt?.toDate().getTime() || assignment.createdAt?.toDate().getTime() || now; const remaining = Math.max(0, end - now); const state = stateOf(assignment, now)
   const remainingPercent = state === 'live' ? Math.round(Math.min(100, remaining / Math.max(1, end - start) * 100)) : 0; const progressPercent = Math.round(completed / assignment.assignedCount * 100)
   const startLabel = new Date(start).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })

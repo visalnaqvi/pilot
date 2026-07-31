@@ -1,6 +1,8 @@
 export type MemberRole = 'student' | 'teacher'
+export type OrganizationMembershipRole = 'owner' | MemberRole
 
-export function memberRole(value: unknown): MemberRole {
+export function memberRole(value: unknown): MemberRole | null {
+  if (value === 'owner') return null
   return value === 'teacher' ? 'teacher' : 'student'
 }
 

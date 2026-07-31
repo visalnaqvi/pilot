@@ -2,21 +2,22 @@
 
 import { ChangeEvent, useCallback, useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { collection, onSnapshot, query, where } from 'firebase/firestore'
-import { getDownloadURL, ref, uploadBytes } from 'firebase/storage'
-import { db, storage } from '@/lib/firebase'
 import {
   ACCEPTED_SOURCE_EXTENSIONS,
-  GenerationConfigSchema,
   MAX_SOURCE_FILE_BYTES,
   MAX_SOURCE_FILES,
   MAX_SOURCE_TOTAL_BYTES,
+  GenerationConfigSchema,
   type GeneratedQuestion,
   type GenerationStatus,
   type SourceAnalysis,
   type SourceUpload,
 } from '@/lib/test-generation/schema'
+import { authenticatedFetch } from '@/lib/authenticated-fetch'
+import { uploadAuthorizedFile } from '@/lib/file-upload'
+import type { ExamCatalogEntry, ExamSelectionStatus } from '@/lib/exam-catalog'
 import { useAuth } from './auth-context'
+import { ExamResolver } from './exam-resolver'
 import { MathText, MathTextEditor } from './math-components'
 import { SearchPicker } from './search-picker'
 
@@ -51,30 +52,13 @@ type Candidate = GeneratedQuestion & {
   position: number
 }
 
-type Exam = { id: string; name: string; primaryAlias?: string }
+type Exam = ExamCatalogEntry
 type Category = { id: string; name: string; examId: string; createdBy: string }
 
 const activeStatuses: GenerationStatus[] = [
   'analyzing', 'generating', 'verification_starting', 'verifying', 'publishing',
 ]
 const accepted = ACCEPTED_SOURCE_EXTENSIONS.map(value => `.${value}`).join(',')
-
-function safeFilename(value: string) {
-  const parts = value.split('.')
-  const extension = parts.length > 1 ? `.${parts.pop()!.toLowerCase()}` : ''
-  return `${parts.join('.').replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-|-$/g, '').slice(0, 100) || 'source'}${extension}`
-}
-
-function sourceMimeType(file: File) {
-  if (file.type) return file.type
-  const extension = file.name.split('.').pop()?.toLowerCase()
-  return ({
-    rtf: 'application/rtf',
-    odt: 'application/vnd.oasis.opendocument.text',
-    txt: 'text/plain',
-    md: 'text/markdown',
-  } as Record<string, string>)[extension || ''] || 'application/octet-stream'
-}
 
 async function responseJson(response: Response) {
   const body: unknown = await response.json().catch(() => null)
@@ -100,6 +84,8 @@ export function AiTestGenerator() {
   const [categories, setCategories] = useState<Category[]>([])
   const [examId, setExamId] = useState('')
   const [categoryId, setCategoryId] = useState('')
+  const [addingExam, setAddingExam] = useState(false)
+  const [newExamName, setNewExamName] = useState('')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [duration, setDuration] = useState(30)
@@ -147,15 +133,72 @@ export function AiTestGenerator() {
     try {
       const body = await api(`/api/test-generation/jobs/${id}`)
       const loaded = body.job as JobDetail
-      setJob(loaded)
-      setQuestions(((body.questions as Candidate[]) || []).sort((a, b) => a.position - b.position))
-      if (loaded.analysis) {
+      const sourceReferences = (loaded.sources || []).map(source => ({
+        sourceId: source.id,
+        filename: source.name,
+        locator: 'Uploaded file',
+        excerpt: 'Source material used for this generated draft.',
+      }))
+      const rawAnalysis = loaded.analysis as Partial<SourceAnalysis> | undefined
+      const analysis: SourceAnalysis = {
+        sourceKind: rawAnalysis?.sourceKind || 'notes',
+        language: rawAnalysis?.language || 'English',
+        subject: rawAnalysis?.subject || 'Study material',
+        summary: rawAnalysis?.summary || 'The uploaded material is ready for question generation.',
+        topics: rawAnalysis?.topics?.length ? rawAnalysis.topics : [{
+          name: rawAnalysis?.subject || 'All uploaded material',
+          importance: 'high',
+          rationale: 'Generate questions across the uploaded study material.',
+          sourceReferences: sourceReferences.length ? sourceReferences : [{
+            sourceId: 'uploaded-material',
+            filename: 'Uploaded material',
+            locator: 'Full source',
+            excerpt: 'The uploaded source material.',
+          }],
+        }],
+        warnings: rawAnalysis?.warnings || [],
+      }
+      const normalizedJob = { ...loaded, analysis }
+      setJob(normalizedJob)
+      const normalizedQuestions = ((body.questions as Array<{
+        id: string
+        position: number
+        content: Record<string, unknown>
+        reviewStatus: string
+        verificationStatus: string
+        verification?: { issues?: string[]; confidence?: number; suggestedFix?: string }
+      }>) || []).map(row => ({
+        id: row.id,
+        kind: row.content.kind === 'short_answer' ? 'short_answer' as const : 'mcq' as const,
+        prompt: String(row.content.prompt || ''),
+        topic: String(row.content.topic || analysis.subject),
+        difficulty: ['easy', 'medium', 'hard'].includes(String(row.content.difficulty)) ? row.content.difficulty as 'easy' | 'medium' | 'hard' : 'medium',
+        marks: Number(row.content.marks || 1),
+        answerOrigin: row.content.answerOrigin === 'model_inferred' ? 'model_inferred' as const : 'source_supported' as const,
+        sourceReferences: Array.isArray(row.content.sourceReferences) ? row.content.sourceReferences : sourceReferences,
+        ...(row.content.kind === 'short_answer' ? {
+          modelAnswer: String(row.content.modelAnswer || ''),
+          rubric: Array.isArray(row.content.rubric) ? row.content.rubric : [{ criterion: 'Correct answer', marks: Number(row.content.marks || 1) }],
+        } : {
+          options: Array.isArray(row.content.options) ? row.content.options.map(String) : ['', '', '', ''],
+          correctAnswer: Number(row.content.correctAnswer || 0),
+          explanation: String(row.content.explanation || ''),
+        }),
+        reviewStatus: row.reviewStatus === 'accepted' ? 'approved' as const : row.reviewStatus === 'rejected' ? 'rejected' as const : 'pending' as const,
+        verificationStatus: row.verificationStatus === 'verified' ? 'supported' as const : 'pending' as const,
+        verificationConfidence: row.verification?.confidence,
+        verificationIssues: row.verification?.issues || [],
+        suggestedFix: row.verification?.suggestedFix,
+        position: row.position,
+      })) as Candidate[]
+      setQuestions(normalizedQuestions.sort((a, b) => a.position - b.position))
+      if (analysis) {
         setConfig(current => ({
           ...current,
-          sourceKind: loaded.analysis!.sourceKind,
-          subject: loaded.analysis!.subject,
-          language: loaded.analysis!.language,
-          selectedTopics: loaded.analysis!.topics.map(topic => topic.name),
+          sourceKind: analysis.sourceKind,
+          subject: analysis.subject,
+          language: analysis.language,
+          selectedTopics: analysis.topics.map(topic => topic.name),
         }))
       }
       if (loaded.titleSuggestion) setTitle(current => current || loaded.titleSuggestion || '')
@@ -174,40 +217,39 @@ export function AiTestGenerator() {
 
   useEffect(() => {
     if (!user || !canReview) return
-    const stopExams = onSnapshot(collection(db, 'examCatalog'), snapshot => {
-      setExams(snapshot.docs.map(item => ({
-        id: item.id,
-        name: String(item.data().name || ''),
-        primaryAlias: String(item.data().primaryAlias || ''),
-      })).filter(item => item.name))
+    const controller = new AbortController()
+    void Promise.all([
+      authenticatedFetch(user, '/api/exams?scope=catalog', { cache: 'no-store', signal: controller.signal }),
+      authenticatedFetch(user, profile?.organizationId ? `/api/categories?organizationId=${encodeURIComponent(profile.organizationId)}` : '/api/categories', { cache: 'no-store', signal: controller.signal }),
+    ]).then(async ([examResponse, categoryResponse]) => {
+      const examBody = await examResponse.json()
+      const categoryBody = await categoryResponse.json()
+      if (!examResponse.ok) throw new Error(examBody.error || 'Unable to load exams.')
+      if (!categoryResponse.ok) throw new Error(categoryBody.error || 'Unable to load categories.')
+      setExams(examBody.items || [])
+      setCategories(categoryBody.items || [])
+    }).catch(error => {
+      if (!controller.signal.aborted) setMessage(error instanceof Error ? error.message : 'Unable to load test options.')
     })
-    const categoriesQuery = profile?.role === 'admin'
-      ? collection(db, 'categories')
-      : query(collection(db, 'categories'), where('createdBy', '==', user.uid))
-    const stopCategories = onSnapshot(categoriesQuery, snapshot => {
-      setCategories(snapshot.docs.map(item => ({
-        id: item.id,
-        name: String(item.data().name || ''),
-        examId: String(item.data().examId || ''),
-        createdBy: String(item.data().createdBy || ''),
-      })).filter(item => item.name && item.examId))
-    })
-    return () => { stopExams(); stopCategories() }
-  }, [canReview, profile?.role, user])
+    return () => controller.abort()
+  }, [canReview, profile?.organizationId, user])
+
+  const activeJobId = job?.id
+  const activeJobStatus = job?.status
+  const generationRequestPending = busy === 'generating' || busy === 'retrying'
 
   useEffect(() => {
-    if (!job || !activeStatuses.includes(job.status)) return
+    if (!activeJobId || ((!activeJobStatus || !activeStatuses.includes(activeJobStatus)) && !generationRequestPending)) return
     const refresh = async () => {
       try {
-        await api(`/api/test-generation/jobs/${job.id}/reconcile`, { method: 'POST' })
-        await loadJob(job.id, true)
+        await loadJob(activeJobId, true)
         await loadJobs()
       } catch { /* The next poll can retry. */ }
     }
     const timer = window.setInterval(() => void refresh(), 4000)
     void refresh()
     return () => window.clearInterval(timer)
-  }, [api, job, loadJob, loadJobs])
+  }, [activeJobId, activeJobStatus, generationRequestPending, loadJob, loadJobs])
 
   function chooseFiles(event: ChangeEvent<HTMLInputElement>) {
     const selected = [...(event.target.files || [])]
@@ -227,17 +269,14 @@ export function AiTestGenerator() {
     try {
       const created = await api('/api/test-generation/jobs', { method: 'POST' })
       const jobId = String(created.jobId)
-      const uploads: SourceUpload[] = []
+      const fileIds: string[] = []
       for (const file of files) {
-        const sourceId = crypto.randomUUID()
-        const path = `test-generation-sources/${user.uid}/${jobId}/${sourceId}/${safeFilename(file.name)}`
-        const mimeType = sourceMimeType(file)
-        await uploadBytes(ref(storage, path), file, { contentType: mimeType })
-        uploads.push({ id: sourceId, name: file.name, path, mimeType, size: file.size })
+        const uploaded = await uploadAuthorizedFile(user, file, profile?.organizationId || null)
+        fileIds.push(uploaded.fileId)
       }
       await api(`/api/test-generation/jobs/${jobId}/finalize`, {
         method: 'POST',
-        body: JSON.stringify({ sources: uploads }),
+        body: JSON.stringify({ fileIds }),
       })
       setFiles([])
       await loadJob(jobId)
@@ -254,10 +293,14 @@ export function AiTestGenerator() {
     setBusy('retrying')
     setMessage('')
     try {
-      await api(`/api/test-generation/jobs/${job.id}/retry`, { method: 'POST' })
+      await api(`/api/test-generation/jobs/${job.id}/generate`, {
+        method: 'POST',
+        body: JSON.stringify({ config: GenerationConfigSchema.parse(config) }),
+      })
       await loadJob(job.id)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Unable to retry this stage.')
+      await loadJob(job.id, true)
     } finally {
       setBusy('')
     }
@@ -275,6 +318,7 @@ export function AiTestGenerator() {
       await loadJob(job.id)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Unable to generate questions.')
+      await loadJob(job.id, true)
     } finally {
       setBusy('')
     }
@@ -294,7 +338,22 @@ export function AiTestGenerator() {
     try {
       await api(`/api/test-generation/jobs/${job.id}/questions/${current.id}`, {
         method: 'PATCH',
-        body: JSON.stringify({ question: current, reviewStatus: status }),
+        body: JSON.stringify({
+          content: {
+            kind: current.kind,
+            prompt: current.prompt,
+            marks: current.marks,
+            ...(current.kind === 'mcq' ? {
+              options: current.options,
+              correctAnswer: current.correctAnswer,
+              explanation: current.explanation,
+            } : {
+              modelAnswer: current.modelAnswer,
+              rubric: current.rubric,
+            }),
+          },
+          reviewStatus: status === 'approved' ? 'accepted' : status === 'rejected' ? 'rejected' : 'pending',
+        }),
       })
       setQuestions(items => items.map((item, itemIndex) => itemIndex === index ? {
         ...item,
@@ -333,7 +392,14 @@ export function AiTestGenerator() {
     try {
       const body = await api(`/api/test-generation/jobs/${job.id}/publish`, {
         method: 'POST',
-        body: JSON.stringify({ title, description, examId, categoryId, durationMinutes: Number(duration), visibility }),
+        body: JSON.stringify({
+          title,
+          description,
+          examId,
+          categoryName: categories.find(item => item.id === categoryId)?.name || '',
+          durationMinutes: Number(duration),
+          visibility,
+        }),
       })
       router.push(`/tests/${String(body.testId)}`)
     } catch (error) {
@@ -357,15 +423,41 @@ export function AiTestGenerator() {
     setBusy('category')
     setMessage('')
     try {
-      const body = await api(`/api/test-generation/jobs/${job.id}/categories`, {
+      const body = await api('/api/categories', {
         method: 'POST',
-        body: JSON.stringify({ name, examId }),
+        body: JSON.stringify({ name, examId, organizationId: profile?.organizationId || null }),
       })
-      const category = body.category as Category
+      const category = body.item as Category
       setCategories(current => current.some(item => item.id === category.id) ? current : [...current, category])
       setCategoryId(category.id)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Unable to create this category.')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  function applyResolvedExam(exam: ExamCatalogEntry, status: ExamSelectionStatus) {
+    setExams(current => current.some(item => item.id === exam.id) ? current : [...current, exam])
+    setExamId(exam.id)
+    setCategoryId('')
+    setAddingExam(false)
+    setMessage(status === 'created' ? `Created and selected ${exam.name}.` : `Selected ${exam.name}.`)
+  }
+
+  async function selectCatalogExam(id: string) {
+    const exam = exams.find(item => item.id === id)
+    if (!exam) return
+    setBusy('exam')
+    setMessage('')
+    try {
+      const result = await api('/api/exams/resolve', {
+        method: 'POST',
+        body: JSON.stringify({ selectionId: exam.id }),
+      })
+      applyResolvedExam(result.exam as ExamCatalogEntry, 'selected')
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to select this exam.')
     } finally {
       setBusy('')
     }
@@ -387,11 +479,16 @@ export function AiTestGenerator() {
   }
 
   const selectedExam = exams.find(item => item.id === examId)
-  const categoryOptions = categories.filter(item => item.examId === examId && (!job || item.createdBy === job.ownerId))
+  const categoryOptions = categories.filter(item => item.examId === examId)
   const mcqQuestions = questions.filter((item): item is Extract<Candidate, { kind: 'mcq' }> => item.kind === 'mcq')
   const shortAnswerCount = questions.length - mcqQuestions.length
   const approvedCount = mcqQuestions.filter(item => item.reviewStatus === 'approved').length
   const analysis = job?.analysis
+  const displayedStatus: GenerationStatus | undefined = job
+    && ((job.status === 'analysis_ready' && busy === 'generating')
+      || (job.status === 'failed' && busy === 'retrying'))
+    ? 'generating'
+    : job?.status
 
   if (!canReview) return <section><h1 className="text-3xl font-black">Access denied</h1></section>
 
@@ -417,11 +514,11 @@ export function AiTestGenerator() {
     </div>}
 
     {job && <div className="mt-8 space-y-7">
-      <Progress status={job.status} />
-      {activeStatuses.includes(job.status) && <ProcessingCard status={job.status} />}
-      {job.status === 'failed' && <div className="rounded-2xl border border-rose-200 bg-rose-50 p-6"><h2 className="text-xl font-black text-rose-900">Generation stopped</h2><p className="mt-2 text-rose-700">{job.error || 'The model did not complete this stage.'}</p><button type="button" disabled={Boolean(busy)} onClick={() => void retryFailedStage()} className="mt-4 rounded-xl bg-rose-700 px-5 py-3 font-bold text-white disabled:opacity-50">{busy === 'retrying' ? 'Retrying…' : 'Retry failed stage'}</button></div>}
+      <Progress status={displayedStatus || job.status} />
+      {displayedStatus && activeStatuses.includes(displayedStatus) && <ProcessingCard status={displayedStatus} />}
+      {displayedStatus === 'failed' && <div className="rounded-2xl border border-rose-200 bg-rose-50 p-6"><h2 className="text-xl font-black text-rose-900">Generation stopped</h2><p className="mt-2 text-rose-700">{job.error || 'The model did not complete this stage.'}</p><button type="button" disabled={Boolean(busy)} onClick={() => void retryFailedStage()} className="mt-4 rounded-xl bg-rose-700 px-5 py-3 font-bold text-white disabled:opacity-50">{busy === 'retrying' ? 'Retrying…' : 'Retry failed stage'}</button></div>}
 
-      {job.status === 'analysis_ready' && analysis && <div className="rounded-3xl border border-slate-200 bg-white p-7 shadow-sm">
+      {displayedStatus === 'analysis_ready' && analysis && <div className="rounded-3xl border border-slate-200 bg-white p-7 shadow-sm">
         <StageNumber number="2" title="Review analysis and configure the test" />
         <div className="mt-6 grid gap-5 md:grid-cols-2">
           <TextField label="Subject" value={config.subject} setValue={value => setConfig(current => ({ ...current, subject: value }))} />
@@ -450,7 +547,9 @@ export function AiTestGenerator() {
           {previewing && <div className="mt-6 rounded-2xl border-2 border-indigo-200 bg-slate-50 p-5"><p className="text-xs font-black uppercase tracking-widest text-indigo-600">Learner preview</p><h3 className="mt-2 text-2xl font-black">{title || job.titleSuggestion || 'Generated mock test'}</h3><div className="mt-5 space-y-4">{mcqQuestions.filter(item => item.reviewStatus === 'approved').map((question, index) => <article key={question.id} className="rounded-xl border border-slate-200 bg-white p-5"><p className="text-xs font-black text-indigo-600">QUESTION {index + 1} · {question.marks} MARK{question.marks === 1 ? '' : 'S'}</p><p className="mt-2 font-bold"><MathText>{question.prompt}</MathText></p><div className="mt-4 grid gap-2">{question.options.map((option, optionIndex) => <label key={optionIndex} className="flex gap-2 rounded-lg border border-slate-200 p-3"><input type="radio" disabled /><MathText>{option}</MathText></label>)}</div></article>)}</div></div>}
           <div className="mt-7 space-y-5">{questions.map((question, index) => <CandidateEditor key={question.id} question={question} index={index} busy={busy === question.id} canMoveUp={index > 0} canMoveDown={index < questions.length - 1} move={direction => void moveQuestion(index, direction)} update={update => setQuestions(items => items.map((item, itemIndex) => itemIndex === index ? { ...item, ...update } as Candidate : item))} save={(status) => void saveQuestion(index, status)} openSource={async source => {
             const upload = job.sources?.find(item => item.id === source.sourceId)
-            if (upload) window.open(await getDownloadURL(ref(storage, upload.path)), '_blank', 'noopener,noreferrer')
+            if (!upload) return
+            const body = await api(`/api/files/${upload.id}/download`)
+            if (typeof body.url === 'string') window.open(body.url, '_blank', 'noopener,noreferrer')
           }} />)}</div>
         </div>
         <div className="rounded-3xl border border-slate-200 bg-white p-7 shadow-sm">
@@ -458,7 +557,16 @@ export function AiTestGenerator() {
           <div className="mt-6 grid gap-5 md:grid-cols-2">
             <TextField label="Test title" value={title} setValue={setTitle} />
             <NumberField label="Duration in minutes (0 for no limit)" value={duration} setValue={setDuration} min={0} max={1440} />
-            <label className="block text-sm font-bold">Exam<span className="mt-2 block font-normal"><SearchPicker value={examId} options={exams.map(item => ({ id: item.id, label: item.name, detail: item.primaryAlias }))} onChange={option => { setExamId(option.id); setCategoryId('') }} placeholder="Select exam" /></span></label>
+            <div>
+              <label className="block text-sm font-bold">Exam<span className="mt-2 block font-normal"><SearchPicker value={examId} options={exams.map(item => ({ id: item.id, label: item.name, detail: [...new Set([item.primaryAlias, ...item.aliases])].filter(alias => alias && alias !== item.name).join(', ') || undefined }))} onChange={option => void selectCatalogExam(option.id)} onCreate={job.status === 'review' ? query => { setNewExamName(query); setAddingExam(true) } : undefined} createLabel="Create exam" placeholder="Search the exam catalog" disabled={busy === 'exam'} /></span></label>
+              {addingExam && <div className="mt-3 rounded-xl border border-indigo-100 bg-indigo-50/50 p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div><p className="text-sm font-bold text-slate-900">Create a new exam</p><p className="mt-1 text-xs text-slate-500">Catalog matches are checked before a new exam can be created.</p></div>
+                  <button type="button" onClick={() => setAddingExam(false)} className="text-sm font-bold text-indigo-700">Cancel</button>
+                </div>
+                <ExamResolver key={newExamName} initialName={newExamName} autoFocus autoResolveInitialName onResolved={applyResolvedExam} />
+              </div>}
+            </div>
             <label className="block text-sm font-bold">Category<span className="mt-2 block font-normal"><SearchPicker value={categoryId} options={categoryOptions.map(item => ({ id: item.id, label: item.name }))} onChange={option => setCategoryId(option.id)} onCreate={job.status === 'review' ? query => void createCategory(query) : undefined} createLabel="Create category" placeholder={selectedExam ? 'Search or create a category' : 'Select an exam first'} disabled={!selectedExam || busy === 'category'} /></span></label>
             <SelectField label="Visibility" value={visibility} setValue={value => setVisibility(value as typeof visibility)} options={[['private', 'Organisation members'], ['assigned', 'Assigned students'], ['public', 'Public']]} />
           </div>

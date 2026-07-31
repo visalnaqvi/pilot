@@ -3,8 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import Image from 'next/image'
-import { collection, deleteDoc, doc, getDoc, getDocs, onSnapshot, query, serverTimestamp, setDoc, updateDoc, where } from 'firebase/firestore'
-import { db } from '@/lib/firebase'
+import { authenticatedFetch } from '@/lib/authenticated-fetch'
 import { useAuth, type UserProfile } from './auth-context'
 import { paginate, Pagination } from './pagination'
 
@@ -32,46 +31,48 @@ export function Invitations() {
 
   useEffect(() => {
     if (!user || !allowed) return
-    return onSnapshot(
-      query(collection(db, 'organisationInvites'), where('userId', '==', user.uid)),
-      snapshot => setInvites(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as OrganisationInvite)),
-      reason => setMessage(`Could not load invitations: ${reason.message}`),
-    )
-  }, [allowed, user])
-
-  useEffect(() => {
-    if (!user || !allowed) return
     let active = true
-    void getDocs(query(collection(db, 'users'), where('role', '==', 'organisation')))
-      .then(snapshot => {
-        if (active) setOrganisations(snapshot.docs
-          .map(item => ({ uid: item.id, ...item.data() }) as UserProfile)
-          .sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email)))
-      })
-      .catch(reason => setMessage(reason instanceof Error ? reason.message : 'Could not load institutes.'))
-    return () => { active = false }
-  }, [allowed, user])
-
-  useEffect(() => {
-    let active = true
-    const missing = [...new Map(invites
-      .filter(invite => !invite.organisationName && !organisationNames[invite.organisationId])
-      .map(invite => [invite.organisationId, invite]))
-      .values()]
-    if (!missing.length) return
-    void Promise.all(missing.map(async invite => {
-      try {
-        const snapshot = await getDoc(doc(db, 'users', invite.organisationId))
-        const name = snapshot.data()?.name
-        return [invite.organisationId, typeof name === 'string' && name.trim() ? name : invite.organisationEmail] as const
-      } catch {
-        return [invite.organisationId, invite.organisationEmail] as const
-      }
-    })).then(entries => {
-      if (active) setOrganisationNames(current => ({ ...current, ...Object.fromEntries(entries) }))
+    void Promise.all([
+      authenticatedFetch(user, '/api/memberships', { cache: 'no-store' }),
+      authenticatedFetch(user, '/api/organizations?directory=1', { cache: 'no-store' }),
+    ]).then(async ([membershipResponse, organizationResponse]) => {
+      const [membershipData, organizationData] = await Promise.all([membershipResponse.json(), organizationResponse.json()])
+      if (!membershipResponse.ok) throw new Error(membershipData.error || 'Could not load invitations.')
+      if (!organizationResponse.ok) throw new Error(organizationData.error || 'Could not load institutes.')
+      if (!active) return
+      setInvites((membershipData.items || []).map((item: {
+        organizationId: string
+        organizationName: string
+        userId: string
+        email: string
+        name?: string
+        initiatedBy?: string
+        status: OrganisationInvite['status']
+      }) => ({
+        id: `${item.organizationId}:${item.userId}`,
+        organisationId: item.organizationId,
+        organisationName: item.organizationName,
+        organisationEmail: item.organizationName,
+        userId: item.userId,
+        userName: item.name,
+        userEmail: item.email,
+        initiatedBy: item.initiatedBy === item.userId ? 'user' : 'organisation',
+        status: item.status,
+      })))
+      setOrganisations((organizationData.items || []).map((item: { id: string; name: string; address?: string; logoUrl?: string }) => ({
+        uid: item.id,
+        email: item.name,
+        name: item.name,
+        role: 'organisation' as const,
+        address: item.address,
+        logoUrl: item.logoUrl,
+      })).sort((a: UserProfile, b: UserProfile) => (a.name || a.email).localeCompare(b.name || b.email)))
+      setOrganisationNames(Object.fromEntries((organizationData.items || []).map((item: { id: string; name: string }) => [item.id, item.name])))
+    }).catch(reason => {
+      if (active) setMessage(reason instanceof Error ? reason.message : 'Could not load institutes.')
     })
     return () => { active = false }
-  }, [invites, organisationNames])
+  }, [allowed, user])
 
   const nameOf = (invite: OrganisationInvite) => invite.organisationName || organisationNames[invite.organisationId] || invite.organisationEmail
   const inviteFrom = (organisationId: string) => invites.find(invite => invite.organisationId === organisationId)
@@ -89,26 +90,27 @@ export function Invitations() {
     setUpdating(requestId)
     setMessage('')
     try {
-      const requestRef = doc(db, 'organisationInvites', requestId)
       const current = inviteFrom(organisation.uid)
       if (current) {
         if (current.status === 'accepted') throw new Error('You have already joined this institute.')
         if (current.status === 'pending') throw new Error(current.initiatedBy === 'user' ? 'Your request is already pending.' : 'This institute has already invited you.')
-        await updateDoc(requestRef, { status: 'pending', initiatedBy: 'user', createdAt: serverTimestamp() })
-      } else {
-        await setDoc(requestRef, {
-          organisationId: organisation.uid,
-          organisationName: organisation.name || organisation.email,
-          organisationEmail: organisation.email,
-          userId: user.uid,
-          userName: profile.name || profile.email,
-          userEmail: profile.email,
-          initiatedBy: 'user',
-          status: 'pending',
-          memberRole: 'student',
-          createdAt: serverTimestamp(),
-        })
       }
+      const response = await authenticatedFetch(user, '/api/memberships', {
+        method: 'POST',
+        body: JSON.stringify({ organizationId: organisation.uid, role: 'student' }),
+      })
+      if (!response.ok) throw new Error((await response.json()).error || 'Unable to send join request.')
+      setInvites(items => [...items.filter(item => item.organisationId !== organisation.uid), {
+        id: requestId,
+        organisationId: organisation.uid,
+        organisationName: organisation.name || organisation.email,
+        organisationEmail: organisation.email,
+        userId: user.uid,
+        userName: profile.name || profile.email,
+        userEmail: profile.email,
+        initiatedBy: 'user',
+        status: 'pending',
+      }])
       setMessage(`Request sent to ${organisation.name || organisation.email}.`)
       setTerm('')
     } catch (reason) {
@@ -122,7 +124,13 @@ export function Invitations() {
     setUpdating(invite.id)
     setMessage('')
     try {
-      await updateDoc(doc(db, 'organisationInvites', invite.id), { status, respondedAt: serverTimestamp() })
+      if (!user) return
+      const response = await authenticatedFetch(user, '/api/memberships', {
+        method: 'PATCH',
+        body: JSON.stringify({ organizationId: invite.organisationId, userId: invite.userId, status }),
+      })
+      if (!response.ok) throw new Error((await response.json()).error || 'Unable to respond to invitation.')
+      setInvites(items => items.map(item => item.id === invite.id ? { ...item, status } : item))
       setMessage(status === 'accepted' ? `You joined ${nameOf(invite)}.` : 'Invitation declined.')
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : 'Unable to respond to invitation.')
@@ -136,7 +144,10 @@ export function Invitations() {
     setUpdating(invite.id)
     setMessage('')
     try {
-      await deleteDoc(doc(db, 'organisationInvites', invite.id))
+      if (!user) return
+      const response = await authenticatedFetch(user, `/api/memberships?organizationId=${invite.organisationId}&userId=${encodeURIComponent(invite.userId)}`, { method: 'DELETE' })
+      if (!response.ok) throw new Error((await response.json()).error || 'Unable to leave institute.')
+      setInvites(items => items.filter(item => item.id !== invite.id))
       setMessage(`You left ${nameOf(invite)}.`)
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : 'Unable to leave institute.')

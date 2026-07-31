@@ -5,31 +5,20 @@ import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { signOut } from 'firebase/auth'
 import { auth } from '@/lib/firebase'
-import { db } from '@/lib/firebase'
-import { collection, onSnapshot, query, where } from 'firebase/firestore'
 import { useAuth } from './auth-context'
 import { NotificationPanel } from './notification-panel'
 import { PendingJoinRequestsBanner } from './pending-join-requests-banner'
-import { memberRole } from '@/lib/membership'
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { user, profile, actualProfile, ready, isImpersonating, stopImpersonating } = useAuth()
   const router = useRouter()
   const pathname = usePathname()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
-  const [canTeach, setCanTeach] = useState(false)
+  const canTeach = profile?.membershipRole === 'teacher'
 
   useEffect(() => {
     if (ready && !user) router.replace('/login')
   }, [ready, router, user])
-  useEffect(() => {
-    if (!user || profile?.role !== 'user') return
-    return onSnapshot(
-      query(collection(db, 'organisationInvites'), where('userId', '==', user.uid), where('status', '==', 'accepted')),
-      snapshot => setCanTeach(snapshot.docs.some(document => memberRole(document.data().memberRole) === 'teacher')),
-      () => setCanTeach(false),
-    )
-  }, [profile?.role, user])
   useEffect(() => {
     if (!mobileMenuOpen) return
     const previousOverflow = document.body.style.overflow
@@ -53,8 +42,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const roleLabel = role === 'organisation' ? 'Institute' : teacherMember ? 'Teacher' : role
   const canManage = role === 'admin' || role === 'organisation'
   const canCreateContent = canManage || teacherMember
-  const organisationProfileId = profile?.uid || user.uid
-  const workPath = pathname === '/assignments' || pathname === '/tasks' || pathname === '/timetables' || pathname === '/calendar' || pathname === '/attendance' || pathname === '/my-classes'
+  const organisationProfileId = profile?.organizationId || profile?.uid || user.uid
+  const workPath = pathname === '/assignments' || pathname === '/tasks' || pathname === '/timetables' || pathname === '/calendar' || pathname.startsWith('/attendance') || pathname === '/my-classes'
   const testPath = pathname === '/tests'
     || pathname.startsWith('/tests/')
     || pathname === '/manage/tests'
@@ -68,14 +57,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const manageHref = role === 'organisation'
     ? '/organisation/groups'
     : role === 'admin'
-      ? '/admin/exam-updates'
+      ? '/admin/users'
       : '/invitations'
 
   const navClass = (active: boolean) => `inline-flex shrink-0 items-center justify-center whitespace-nowrap rounded-lg px-2 py-2 text-xs font-semibold transition-colors sm:px-3 sm:text-sm ${
     active ? 'bg-indigo-100 text-indigo-800' : 'text-indigo-700 hover:bg-indigo-50'
   }`
   const workspaceTab = (path: string) => `relative -mb-px flex shrink-0 items-center gap-2 rounded-t-xl border px-3 py-2.5 text-xs font-bold transition-colors sm:gap-3 sm:px-4 sm:py-3 sm:text-sm ${
-    pathname === path
+    pathname === path || pathname.startsWith(`${path}/`)
       ? 'z-10 border-slate-200 border-b-white bg-white text-indigo-700 shadow-[0_-2px_8px_rgb(15_23_42/0.04)]'
       : 'border-transparent text-slate-500 hover:bg-white/70 hover:text-slate-900'
   }`
@@ -208,10 +197,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     <Link href="/organisation/users" className={workspaceTab('/organisation/users')}>Students</Link>
                   </>
                 ) : (
-                  <>
-                    <Link href="/admin/exam-updates" className={workspaceTab('/admin/exam-updates')}>Exam updates</Link>
-                    <Link href="/admin/users" className={workspaceTab('/admin/users')}>Students</Link>
-                  </>
+                  <Link href="/admin/users" className={workspaceTab('/admin/users')}>Students</Link>
                 )}
               </div>
             </nav>

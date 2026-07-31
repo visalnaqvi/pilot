@@ -1,36 +1,33 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { collection, onSnapshot, orderBy, query } from 'firebase/firestore'
 import { useRouter } from 'next/navigation'
-import { db } from '@/lib/firebase'
+import { authenticatedFetch } from '@/lib/authenticated-fetch'
 import { useAuth, type UserProfile } from './auth-context'
 import { SearchPicker } from './search-picker'
 
 export function AdminImpersonationPicker() {
-  const { actualProfile, isImpersonating, startImpersonating } = useAuth()
+  const { actualUser, actualProfile, isImpersonating, startImpersonating } = useAuth()
   const router = useRouter()
   const [accounts, setAccounts] = useState<UserProfile[]>([])
   const [error, setError] = useState('')
 
   useEffect(() => {
-    if (actualProfile?.role !== 'admin' || isImpersonating) return
-    return onSnapshot(query(collection(db, 'users'), orderBy('email')), snapshot => {
-      setAccounts(snapshot.docs
-        .map(item => ({ uid: item.id, ...item.data() }) as UserProfile)
-        .filter(account => account.role === 'user' || account.role === 'organisation'))
-      setError('')
-    }, reason => setError(`Could not load accounts: ${reason.message}`))
-  }, [actualProfile?.role, isImpersonating])
+    if (!actualUser || actualProfile?.role !== 'admin' || isImpersonating) return
+    authenticatedFetch(actualUser, '/api/users', { cache: 'no-store' })
+      .then(async response => {
+        if (!response.ok) throw new Error((await response.json()).error)
+        setAccounts(((await response.json()).items as UserProfile[]).filter(item => item.role !== 'admin'))
+      })
+      .catch(reason => setError(reason.message))
+  }, [actualProfile?.role, actualUser, isImpersonating])
 
   const options = useMemo(() => accounts.map(account => ({
     id: account.uid,
     label: account.name?.trim() || account.email,
     detail: `${account.email} · ${account.role === 'organisation' ? 'Institute' : 'Student'}`,
   })), [accounts])
-
   if (actualProfile?.role !== 'admin' || isImpersonating) return null
-
   return <section className="mb-8 overflow-visible rounded-2xl border border-violet-200 bg-gradient-to-r from-violet-50 via-white to-indigo-50 p-5 shadow-sm">
     <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,26rem)] lg:items-end">
       <div>

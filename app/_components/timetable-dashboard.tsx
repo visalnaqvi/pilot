@@ -1,16 +1,10 @@
 'use client'
 
-import { type FormEvent, useEffect, useMemo, useState } from 'react'
+import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
+import Link from 'next/link'
 import FullCalendar from '@fullcalendar/react'
 import timeGridPlugin from '@fullcalendar/timegrid'
-import {
-  collection,
-  getDocs,
-  onSnapshot,
-  query,
-  where,
-} from 'firebase/firestore'
-import { db } from '@/lib/firebase'
+import { authenticatedFetch } from '@/lib/authenticated-fetch'
 import {
   addDays,
   daysForTimetableEntry,
@@ -24,10 +18,11 @@ import {
 } from '@/lib/timetable'
 import { useAuth } from './auth-context'
 import { TimetableEditor as InteractiveTimetableEditor } from './timetable-editor'
-import { memberRole, type MemberRole } from '@/lib/membership'
+import { memberRole, type OrganizationMembershipRole } from '@/lib/membership'
+import { WorkDataLoading } from './work-data-loading'
 
 type DateValue = { toDate: () => Date }
-type Member = { userId: string; userName?: string; userEmail: string; status?: string; memberRole?: MemberRole }
+type Member = { userId: string; userName?: string; userEmail: string; status?: string; memberRole?: OrganizationMembershipRole }
 type DirectoryUser = { name?: string; email?: string; role?: string }
 type Group = { id: string; name: string; members: Member[] }
 type DraftTimetable = TimetableInput & {
@@ -35,17 +30,19 @@ type DraftTimetable = TimetableInput & {
   organisationId: string
   organisationName: string
   timeZone: string
+  status: 'active' | 'archived'
   publishedRevision?: number
   updatedAt?: DateValue
 }
 export type PublishedTimetable = TimetableInput & {
   id: string
+  versionId: string
   organisationId: string
   organisationName: string
   timeZone: string
   status: 'active' | 'archived'
   revision: number
-  assignedUserIds: string[]
+  selectedUserIds: string[]
   teacherUserIds?: string[]
   audienceNames?: string[]
   publishedAt?: DateValue
@@ -89,98 +86,73 @@ export function TimetableDashboard() {
   const [input, setInput] = useState<TimetableInput>(() => emptyInput())
   const [saving, setSaving] = useState(false)
   const [publishing, setPublishing] = useState(false)
+  const [disablingId, setDisablingId] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
   const [message, setMessage] = useState('')
+  const [loading, setLoading] = useState(true)
   const [viewerMembershipRole, setViewerMembershipRole] = useState<'loading' | 'student' | 'teacher'>('loading')
   const [openedEntry, setOpenedEntry] = useState<{ entry: TimetableEntry; timetable: PublishedTimetable; classDate: string } | null>(null)
 
-  useEffect(() => {
-    if (!user || !canManage) return
-    return onSnapshot(
-      query(collection(db, 'timetableDrafts'), where('organisationId', '==', user.uid)),
-      snapshot => setDrafts(snapshot.docs
-        .map(document => ({ id: document.id, ...document.data() }) as DraftTimetable)
-        .sort((first, second) => first.name.localeCompare(second.name))),
-      reason => setMessage(`Could not load timetable drafts: ${reason.message}`),
-    )
-  }, [canManage, user])
+  const loadData = useCallback(async () => {
+    if (!user || !canView) return
+    const organizationId = profile?.organizationId
+    const requests = [
+      authenticatedFetch(user, '/api/timetables', { cache: 'no-store' }),
+      authenticatedFetch(user, '/api/memberships' + (canManage && organizationId ? `?organizationId=${organizationId}` : ''), { cache: 'no-store' }),
+      authenticatedFetch(user, '/api/users', { cache: 'no-store' }),
+      authenticatedFetch(user, '/api/groups' + (organizationId ? `?organizationId=${organizationId}` : ''), { cache: 'no-store' }),
+    ]
+    const responses = await Promise.all(requests)
+    const payloads = await Promise.all(responses.map(response => response.json()))
+    const failed = responses.findIndex(response => !response.ok)
+    if (failed >= 0) throw new Error(payloads[failed].error || 'Unable to load timetables.')
 
-  useEffect(() => {
-    if (!user || role !== 'user') return
-    return onSnapshot(
-      query(collection(db, 'organisationInvites'), where('userId', '==', user.uid), where('status', '==', 'accepted')),
-      snapshot => setViewerMembershipRole(snapshot.docs.some(document => memberRole(document.data().memberRole) === 'teacher') ? 'teacher' : 'student'),
-      () => setViewerMembershipRole('student'),
-    )
-  }, [role, user])
+    const timetables = (payloads[0].items || []).map((item: Record<string, unknown>) => ({
+      ...item,
+      selectedUserIds: item.selectedUserIds || [],
+      selectedGroupIds: item.selectedGroupIds || [],
+      entries: item.entries || [],
+      publishedAt: typeof item.publishedAt === 'string' ? { toDate: () => new Date(item.publishedAt as string) } : undefined,
+      archivedAt: typeof item.archivedAt === 'string' ? { toDate: () => new Date(item.archivedAt as string) } : null,
+      updatedAt: typeof item.updatedAt === 'string' ? { toDate: () => new Date(item.updatedAt as string) } : undefined,
+    }))
+    setDrafts(canManage ? timetables.filter((item: { state?: string }) => item.state === 'draft') as DraftTimetable[] : [])
+    setPublished(timetables.filter((item: { state?: string }) => item.state === 'published') as PublishedTimetable[])
+
+    const membershipItems = (payloads[1].items || []) as Array<{
+      userId: string
+      email: string
+      name?: string
+      status: string
+      role: OrganizationMembershipRole
+    }>
+    setMembers(membershipItems.filter(item => item.status === 'accepted').map(item => ({
+      userId: item.userId,
+      userEmail: item.email,
+      userName: item.name,
+      status: item.status,
+      memberRole: item.role,
+    })))
+    setDirectory(Object.fromEntries(((payloads[2].items || []) as Array<{ uid: string; email: string; name?: string; role?: string }>).map(item => [item.uid, item])))
+    setGroups((payloads[3].items || []) as Group[])
+    setViewerMembershipRole(profile?.membershipRole === 'teacher' ? 'teacher' : 'student')
+    setMessage('')
+  }, [canManage, canView, profile?.membershipRole, profile?.organizationId, user])
 
   useEffect(() => {
     if (!user || !canView) return
-    if (!canManage && viewerMembershipRole === 'loading') return
-    if (!canManage && viewerMembershipRole === 'teacher') {
-      let active = true
-      void user.getIdToken()
-        .then(token => fetch('/api/timetables', { headers: { authorization: `Bearer ${token}` } }))
-        .then(async response => {
-          const payload = await response.json().catch(() => ({})) as { timetables?: PublishedTimetable[]; error?: string }
-          if (!response.ok) throw new Error(payload.error || 'Unable to load published timetables.')
-          if (active) setPublished((payload.timetables || []).sort((first, second) => first.name.localeCompare(second.name)))
+    let active = true
+    queueMicrotask(() => {
+      if (!active) return
+      setLoading(true)
+      void loadData()
+        .catch(reason => setMessage(`Could not load timetables: ${reason instanceof Error ? reason.message : 'Unknown error'}`))
+        .finally(() => {
+          if (active) setLoading(false)
         })
-        .catch(reason => {
-          if (active) setMessage(`Could not load published timetables: ${reason instanceof Error ? reason.message : 'Unknown error'}`)
-        })
-      return () => { active = false }
-    }
-    const source = canManage
-      ? query(collection(db, 'timetables'), where('organisationId', '==', user.uid))
-      : query(collection(db, 'timetables'), where('assignedUserIds', 'array-contains', user.uid))
-    return onSnapshot(
-      source,
-      snapshot => setPublished(snapshot.docs
-        .map(document => ({ id: document.id, ...document.data() }) as PublishedTimetable)
-        .sort((first, second) => first.name.localeCompare(second.name))),
-      reason => setMessage(`Could not load published timetables: ${reason.message}`),
-    )
-  }, [canManage, canView, user, viewerMembershipRole])
-
-  useEffect(() => {
-    if (!user || !canManage) return
-    return onSnapshot(
-      query(collection(db, 'organisationInvites'), where('organisationId', '==', user.uid)),
-      snapshot => setMembers(snapshot.docs
-        .map(document => document.data() as Member)
-        .filter(member => member.status === 'accepted')),
-      reason => setMessage(`Could not load institute students: ${reason.message}`),
-    )
-  }, [canManage, user])
-
-  useEffect(() => {
-    if (!user || !canManage) return
-    return onSnapshot(collection(db, 'users'), snapshot => {
-      setDirectory(Object.fromEntries(snapshot.docs.map(document => [
-        document.id,
-        document.data() as DirectoryUser,
-      ])))
-    }, reason => setMessage(`Could not load student names: ${reason.message}`))
-  }, [canManage, user])
-
-  useEffect(() => {
-    if (!user || !canManage) return
-    return onSnapshot(
-      query(collection(db, 'organisationGroups'), where('organisationId', '==', user.uid)),
-      snapshot => {
-        void Promise.all(snapshot.docs.map(async document => {
-          const groupMembers = await getDocs(collection(document.ref, 'members'))
-          return {
-            id: document.id,
-            name: String(document.data().name || 'Batch'),
-            members: groupMembers.docs.map(member => member.data() as Member),
-          }
-        })).then(items => setGroups(items.sort((first, second) => first.name.localeCompare(second.name))))
-          .catch(() => setMessage('Could not load institute batches.'))
-      },
-      reason => setMessage(`Could not load institute batches: ${reason.message}`),
-    )
-  }, [canManage, user])
+    })
+    return () => { active = false }
+  }, [canView, loadData, user])
 
   const viewerIsTeacher = role === 'user' && viewerMembershipRole === 'teacher'
   const activeTimetables = useMemo(() => published
@@ -194,6 +166,17 @@ export function TimetableDashboard() {
     }))
     .filter(timetable => timetable.entries.length > 0), [published, user?.uid, viewerIsTeacher])
   const conflictCount = useMemo(() => crossTimetableConflicts(activeTimetables), [activeTimetables])
+  const managedTimetables = useMemo(() => [...new Set([
+    ...drafts.map(timetable => timetable.id),
+    ...published.map(timetable => timetable.id),
+  ])].map(id => {
+    const draft = drafts.find(timetable => timetable.id === id)
+    const live = published.find(timetable => timetable.id === id)
+    return {
+      id,
+      timetable: draft || live!,
+    }
+  }), [drafts, published])
   const resolvedPeople = useMemo(() => members.map(member => ({
     ...member,
     userName: directory[member.userId]?.name || member.userName,
@@ -209,6 +192,7 @@ export function TimetableDashboard() {
   ]), [groups, input.selectedGroupIds, input.selectedUserIds])
 
   if (!canView) return <section><h1 className="text-3xl font-black">Access denied</h1></section>
+  if (loading) return <WorkDataLoading label="timetables" />
 
   function openNew() {
     setEditingId(null)
@@ -217,15 +201,15 @@ export function TimetableDashboard() {
     setFormOpen(true)
   }
 
-  function openDraft(draft: DraftTimetable) {
-    setEditingId(draft.id)
+  function openTimetable(timetable: DraftTimetable | PublishedTimetable) {
+    setEditingId(timetable.id)
     setInput({
-      name: draft.name,
-      effectiveFrom: draft.effectiveFrom,
-      effectiveTo: draft.effectiveTo,
-      selectedUserIds: [...draft.selectedUserIds],
-      selectedGroupIds: [...draft.selectedGroupIds],
-      entries: draft.entries.map(entry => ({
+      name: timetable.name,
+      effectiveFrom: timetable.effectiveFrom,
+      effectiveTo: timetable.effectiveTo,
+      selectedUserIds: [...timetable.selectedUserIds],
+      selectedGroupIds: [...timetable.selectedGroupIds],
+      entries: timetable.entries.map(entry => ({
         ...entry,
         weekdays: daysForTimetableEntry(entry),
         weekday: undefined,
@@ -266,6 +250,7 @@ export function TimetableDashboard() {
     if (validation) throw new Error(validation)
     const payload = {
       ...input,
+      organizationId: profile?.organizationId,
       name: input.name.trim(),
       entries: input.entries.map(entry => ({
         ...entry,
@@ -289,6 +274,7 @@ export function TimetableDashboard() {
     setMessage('')
     try {
       await persistDraft()
+      await loadData()
       setMessage('Timetable draft saved.')
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : 'Unable to save the timetable.')
@@ -303,6 +289,7 @@ export function TimetableDashboard() {
     try {
       const id = await persistDraft()
       const result = await api(`/api/timetables/${id}/publish`, 'POST')
+      await loadData()
       setMessage(result.changed === false ? 'This timetable is already up to date.' : 'Timetable published. Students can now see the updated schedule.')
       setFormOpen(false)
     } catch (reason) {
@@ -312,16 +299,37 @@ export function TimetableDashboard() {
     }
   }
 
-  async function archiveTimetable(timetable: PublishedTimetable) {
-    if (!window.confirm(`Archive ${timetable.name}? Students will be notified and future reminders will stop.`)) return false
+  async function disableTimetable(timetable: DraftTimetable | PublishedTimetable) {
+    if (!window.confirm(`Disable "${timetable.name}"? It will be removed from the active schedule and future reminders will stop.`)) return
+    setDisablingId(timetable.id)
     setMessage('')
     try {
       await api(`/api/timetables/${timetable.id}/archive`, 'POST')
-      setMessage('Timetable archived. Future morning reminders have been stopped.')
-      return true
+      await loadData()
+      setMessage('Timetable disabled. It can now be permanently deleted.')
     } catch (reason) {
-      setMessage(reason instanceof Error ? reason.message : 'Unable to archive the timetable.')
-      return false
+      setMessage(reason instanceof Error ? reason.message : 'Unable to disable the timetable.')
+    } finally {
+      setDisablingId(null)
+    }
+  }
+
+  async function deleteTimetable(timetable: DraftTimetable | PublishedTimetable) {
+    if (!window.confirm(`Delete "${timetable.name}"? This permanently removes its classes and attendance history.`)) return
+    setDeletingId(timetable.id)
+    setMessage('')
+    try {
+      await api(`/api/timetables/${timetable.id}`, 'DELETE')
+      if (editingId === timetable.id) {
+        setEditingId(null)
+        setFormOpen(false)
+      }
+      await loadData()
+      setMessage('Timetable deleted.')
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : 'Unable to delete the timetable.')
+    } finally {
+      setDeletingId(null)
     }
   }
 
@@ -340,22 +348,19 @@ export function TimetableDashboard() {
     {message && <p className={`mt-5 rounded-xl p-3 text-sm font-semibold ${/unable|cannot|could not|must|needs|invalid/i.test(message) ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`}>{message}</p>}
     {conflictCount > 0 && <p className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800">Schedule warning: {conflictCount} class overlap{conflictCount === 1 ? '' : 's'} exist across different timetables. These are allowed, but the affected schedules should be reviewed.</p>}
 
-    {canManage && <div className="mt-7 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-      {drafts.map(draft => {
-        const live = published.find(timetable => timetable.id === draft.id)
-        return <article key={draft.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <div className="flex items-start justify-between gap-3">
-            <div><h2 className="font-black text-slate-950">{draft.name}</h2><p className="mt-1 text-xs text-slate-500">{draft.effectiveFrom} – {draft.effectiveTo}</p></div>
-            <StatusBadge status={live?.status || 'draft'} />
-          </div>
-          <p className="mt-4 text-sm text-slate-600">{draft.entries.length} weekly class{draft.entries.length === 1 ? '' : 'es'} · {draft.selectedGroupIds.length} batch{draft.selectedGroupIds.length === 1 ? '' : 's'} · {draft.selectedUserIds.length} direct student{draft.selectedUserIds.length === 1 ? '' : 's'}</p>
-          <div className="mt-5 flex flex-wrap gap-2">
-            <button type="button" onClick={() => openDraft(draft)} className="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-black text-white shadow-sm hover:bg-indigo-700">Edit</button>
-          </div>
-        </article>
-      })}
-      {!drafts.length && <div className="rounded-2xl border-2 border-dashed border-slate-200 p-8 text-center md:col-span-2 xl:col-span-3"><p className="font-black text-slate-800">No timetable drafts yet</p><p className="mt-1 text-sm text-slate-500">Create a weekly timetable, select its students, then publish it.</p></div>}
-    </div>}
+    {canManage && <section className="mt-7">
+      <div className="mb-3 flex items-end justify-between gap-3">
+        <div><p className="text-xs font-black tracking-widest text-indigo-600">MANAGE TIMETABLES</p><h2 className="mt-1 text-xl font-black text-slate-950">Existing timetables</h2></div>
+        <p className="text-xs font-semibold text-slate-500">{managedTimetables.length} timetable{managedTimetables.length === 1 ? '' : 's'}</p>
+      </div>
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        {managedTimetables.map(({ id, timetable }) => <article key={id} className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
+          <h3 className="min-w-0 truncate font-black text-slate-950">{timetable.name}</h3>
+          <button type="button" onClick={() => openTimetable(timetable)} className="shrink-0 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-black text-white shadow-sm hover:bg-indigo-700">Edit</button>
+        </article>)}
+        {!managedTimetables.length && <div className="rounded-2xl border-2 border-dashed border-slate-200 p-8 text-center md:col-span-2 xl:col-span-3"><p className="font-black text-slate-800">No timetables yet</p><p className="mt-1 text-sm text-slate-500">Create a weekly timetable, select its students, then publish it.</p></div>}
+      </div>
+    </section>}
 
     <section className="mt-8 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -374,16 +379,20 @@ export function TimetableDashboard() {
       assigneeCount={assigneeIds.size}
       saving={saving}
       publishing={publishing}
-      canArchive={published.some(timetable => timetable.id === editingId && timetable.status === 'active')}
+      disabling={disablingId === editingId}
+      deleting={deletingId === editingId}
+      canDisable={managedTimetables.some(item => item.id === editingId && item.timetable.status === 'active')}
+      canDelete={managedTimetables.some(item => item.id === editingId && item.timetable.status === 'archived')}
       setInput={setInput}
       save={saveDraft}
       publish={() => void publishDraft()}
-      archive={() => {
-        const active = published.find(timetable => timetable.id === editingId && timetable.status === 'active')
-        if (!active) return
-        void archiveTimetable(active).then(archived => {
-          if (archived) setFormOpen(false)
-        })
+      disable={() => {
+        const current = managedTimetables.find(item => item.id === editingId)?.timetable
+        if (current) void disableTimetable(current)
+      }}
+      remove={() => {
+        const current = managedTimetables.find(item => item.id === editingId)?.timetable
+        if (current) void deleteTimetable(current)
       }}
       close={() => setFormOpen(false)}
     />}
@@ -487,8 +496,11 @@ export function LegacyTimetableEditor(props: {
 }
 
 function WeeklySchedule({ timetables, open }: { timetables: PublishedTimetable[]; open: (entry: TimetableEntry, timetable: PublishedTimetable, classDate: string) => void }) {
-  const displayDates = currentWeekDateKeys(timetables[0]?.timeZone)
+  const displayTimeZone = timetables[0]?.timeZone || 'Asia/Kolkata'
+  const displayDates = currentWeekDateKeys(displayTimeZone)
+  const today = localDateKey(new Date(), displayTimeZone)
   return <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">{timetableWeekdays.map((day, weekday) => {
+    const isToday = displayDates[weekday] === today
     const slots = timetables.flatMap(timetable => {
       const classDate = currentWeekDateKeys(timetable.timeZone)[weekday]
       if (classDate < timetable.effectiveFrom || classDate > timetable.effectiveTo) return []
@@ -496,8 +508,23 @@ function WeeklySchedule({ timetables, open }: { timetables: PublishedTimetable[]
         .filter(entry => daysForTimetableEntry(entry).includes(weekday))
         .map(entry => ({ entry, timetable, classDate }))
     }).sort((first, second) => first.entry.startTime.localeCompare(second.entry.startTime))
-    return <section key={day} className="min-h-36 rounded-xl border border-slate-200 bg-slate-50 p-3"><h3 className="text-xs font-black uppercase tracking-wider text-slate-500">{day}</h3><p className="mt-0.5 text-[10px] font-bold text-slate-400">{new Date(`${displayDates[weekday]}T00:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</p><div className="mt-3 space-y-2">{slots.map(({ entry, timetable, classDate }) => <button type="button" key={`${timetable.id}:${entry.id}`} onClick={() => open(entry, timetable, classDate)} className="block w-full rounded-lg border border-indigo-200 bg-white p-2.5 text-left shadow-sm hover:border-indigo-400"><span className="block text-[10px] font-black text-indigo-600">{entry.startTime}–{entry.endTime}</span><span className="mt-1 block text-xs font-black text-slate-900">{entry.subject}</span><span className="mt-0.5 block truncate text-[10px] text-slate-500">{entry.teacher || timetable.name}</span></button>)}{!slots.length && <p className="text-xs text-slate-400">No classes</p>}</div></section>
+    return <section
+      key={day}
+      aria-current={isToday ? 'date' : undefined}
+      className={`min-h-36 rounded-xl border p-3 ${isToday ? 'border-indigo-400 bg-indigo-50 shadow-sm ring-2 ring-indigo-100' : 'border-slate-200 bg-slate-50'}`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <h3 className={`text-xs font-black uppercase tracking-wider ${isToday ? 'text-indigo-700' : 'text-slate-500'}`}>{day}</h3>
+        {isToday && <span className="rounded-full bg-indigo-600 px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-white">Today</span>}
+      </div>
+      <p className={`mt-0.5 text-[10px] font-bold ${isToday ? 'text-indigo-500' : 'text-slate-400'}`}>{new Date(`${displayDates[weekday]}T00:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</p>
+      <div className="mt-3 space-y-2">{slots.map(({ entry, timetable, classDate }) => <button type="button" key={`${timetable.id}:${entry.id}`} onClick={() => open(entry, timetable, classDate)} className="block w-full rounded-lg border border-indigo-200 bg-white p-2.5 text-left shadow-sm hover:border-indigo-400"><span className="block text-xs font-black tabular-nums text-indigo-600">{formatHourMinute(entry.startTime)}–{formatHourMinute(entry.endTime)}</span><span className="mt-1 block text-xs font-black text-slate-900">{entry.subject}</span><span className="mt-0.5 block truncate text-[10px] text-slate-500">{entry.teacher || timetable.name}</span></button>)}{!slots.length && <p className="text-xs text-slate-400">No classes</p>}</div>
+    </section>
   })}</div>
+}
+
+function formatHourMinute(time: string) {
+  return time.split(':').slice(0, 2).join(':')
 }
 
 function currentWeekDateKeys(timeZone = 'Asia/Kolkata') {
@@ -597,13 +624,13 @@ function EntryDetails({ entry, timetable, classDate, canManageAttendance, close 
         method: 'POST',
         headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
         body: JSON.stringify({
-          timetableId: timetable.id,
-          entryId: entry.id,
+          timetableVersionId: timetable.versionId,
+          timetableEntryId: entry.id,
           classDate,
           intent: 'cancel',
         }),
       })
-      const opened = await openResponse.json().catch(() => ({})) as { session?: { id: string; revision: number; status: string }; error?: string }
+      const opened = await openResponse.json().catch(() => ({})) as { session?: { id: string; status: string }; error?: string }
       if (!openResponse.ok || !opened.session) throw new Error(opened.error || 'Unable to open this class occurrence.')
       if (opened.session.status === 'cancelled') {
         setCancelled(true)
@@ -614,9 +641,8 @@ function EntryDetails({ entry, timetable, classDate, canManageAttendance, close 
         method: 'PUT',
         headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
         body: JSON.stringify({
-          revision: opened.session.revision,
           status: 'cancelled',
-          records: [],
+          marks: [],
           cancellationReason,
         }),
       })
@@ -633,16 +659,12 @@ function EntryDetails({ entry, timetable, classDate, canManageAttendance, close 
     }
   }
 
-  return <div role="dialog" aria-modal="true" className="fixed inset-0 z-[70] grid place-items-center bg-slate-950/55 p-4" onMouseDown={close}><section className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl" onMouseDown={event => event.stopPropagation()}><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-black tracking-widest text-indigo-600">CLASS DETAILS</p><h2 className="mt-2 text-2xl font-black">{entry.subject}</h2><p className="mt-1 text-sm font-semibold text-indigo-700">{timetable.organisationName} · {timetable.name}</p></div><button type="button" onClick={close} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold">Close</button></div><dl className="mt-6 space-y-3 rounded-xl bg-slate-50 p-4 text-sm"><Detail label="Class date" value={classDate} /><Detail label="Schedule" value={`${days}, ${entry.startTime}–${entry.endTime}`} /><Detail label="Effective dates" value={`${timetable.effectiveFrom} – ${timetable.effectiveTo}`} />{entry.teacher && <Detail label="Teacher" value={entry.teacher} />}{entry.location && <Detail label="Room or location" value={entry.location} />}{entry.notes && <Detail label="Notes" value={entry.notes} />}</dl>{message && <p role="status" className={`mt-4 rounded-xl px-4 py-3 text-sm font-bold ${cancelled ? 'bg-slate-100 text-slate-700' : 'bg-rose-50 text-rose-700'}`}>{message}</p>}<div className="mt-5 grid gap-2 sm:grid-cols-2">{canManageAttendance && (isFuture || cancelled ? <button type="button" disabled title={cancelled ? 'This class is cancelled' : 'Attendance is available on the class date'} className="cursor-not-allowed rounded-xl bg-emerald-200 px-4 py-3 text-center text-sm font-black text-emerald-800 opacity-70">{cancelled ? 'Class cancelled' : 'Take attendance'}</button> : <a href={`/attendance?timetableId=${encodeURIComponent(timetable.id)}&entryId=${encodeURIComponent(entry.id)}&classDate=${encodeURIComponent(classDate)}`} className="rounded-xl bg-emerald-600 px-4 py-3 text-center text-sm font-black text-white hover:bg-emerald-700">Take attendance</a>)}{canManageAttendance && <button type="button" disabled={cancelling || cancelled} onClick={() => void cancelClass()} className="rounded-xl border border-rose-300 px-4 py-3 text-sm font-black text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50">{cancelling ? 'Cancelling…' : cancelled ? 'Class cancelled' : 'Cancel class'}</button>}{entry.meetingUrl && <a href={entry.meetingUrl} target="_blank" rel="noreferrer" className="rounded-xl bg-indigo-600 px-4 py-3 text-center text-sm font-black text-white">Open meeting link</a>}</div></section></div>
+  const attendanceHref = `/attendance/take?timetableVersionId=${encodeURIComponent(timetable.versionId)}&timetableEntryId=${encodeURIComponent(entry.id)}&classDate=${encodeURIComponent(classDate)}`
+  return <div role="dialog" aria-modal="true" className="fixed inset-0 z-[70] grid place-items-center bg-slate-950/55 p-4" onMouseDown={close}><section className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl" onMouseDown={event => event.stopPropagation()}><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-black tracking-widest text-indigo-600">CLASS DETAILS</p><h2 className="mt-2 text-2xl font-black">{entry.subject}</h2><p className="mt-1 text-sm font-semibold text-indigo-700">{timetable.organisationName} · {timetable.name}</p></div><button type="button" onClick={close} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold">Close</button></div><dl className="mt-6 space-y-3 rounded-xl bg-slate-50 p-4 text-sm"><Detail label="Class date" value={classDate} /><Detail label="Schedule" value={`${days}, ${entry.startTime}–${entry.endTime}`} /><Detail label="Effective dates" value={`${timetable.effectiveFrom} – ${timetable.effectiveTo}`} />{entry.teacher && <Detail label="Teacher" value={entry.teacher} />}{entry.location && <Detail label="Room or location" value={entry.location} />}{entry.notes && <Detail label="Notes" value={entry.notes} />}</dl>{message && <p role="status" className={`mt-4 rounded-xl px-4 py-3 text-sm font-bold ${cancelled ? 'bg-slate-100 text-slate-700' : 'bg-rose-50 text-rose-700'}`}>{message}</p>}<div className="mt-5 grid gap-2 sm:grid-cols-2">{canManageAttendance && (isFuture || cancelled ? <button type="button" disabled title={cancelled ? 'This class is cancelled' : 'Attendance is available on the class date'} className="cursor-not-allowed rounded-xl bg-emerald-200 px-4 py-3 text-center text-sm font-black text-emerald-800 opacity-70">{cancelled ? 'Class cancelled' : 'Take attendance'}</button> : <Link href={attendanceHref} className="rounded-xl bg-emerald-600 px-4 py-3 text-center text-sm font-black text-white hover:bg-emerald-700">Take attendance</Link>)}{canManageAttendance && <button type="button" disabled={cancelling || cancelled} onClick={() => void cancelClass()} className="rounded-xl border border-rose-300 px-4 py-3 text-sm font-black text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50">{cancelling ? 'Cancelling…' : cancelled ? 'Class cancelled' : 'Cancel class'}</button>}{entry.meetingUrl && <a href={entry.meetingUrl} target="_blank" rel="noreferrer" className="rounded-xl bg-indigo-600 px-4 py-3 text-center text-sm font-black text-white">Open meeting link</a>}</div></section></div>
 }
 
 function Detail({ label, value }: { label: string; value: string }) {
   return <div><dt className="text-xs font-black uppercase tracking-wider text-slate-400">{label}</dt><dd className="mt-1 whitespace-pre-wrap font-semibold text-slate-800">{value}</dd></div>
-}
-
-function StatusBadge({ status }: { status: 'active' | 'archived' | 'draft' }) {
-  const style = status === 'active' ? 'bg-emerald-100 text-emerald-700' : status === 'archived' ? 'bg-slate-200 text-slate-600' : 'bg-amber-100 text-amber-700'
-  return <span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase ${style}`}>{status}</span>
 }
 
 function AudienceChoice({ checked, label, detail, onChange }: { checked: boolean; label: string; detail: string; onChange: () => void }) {
@@ -667,7 +689,7 @@ function crossTimetableConflicts(timetables: PublishedTimetable[]) {
         timetableId: timetable.id,
         effectiveFrom: timetable.effectiveFrom,
         effectiveTo: timetable.effectiveTo,
-        assignedUserIds: timetable.assignedUserIds,
+        selectedUserIds: timetable.selectedUserIds,
       })))
       .sort((first, second) => first.entry.startTime.localeCompare(second.entry.startTime))
     for (let first = 0; first < entries.length; first += 1) {
@@ -675,7 +697,7 @@ function crossTimetableConflicts(timetables: PublishedTimetable[]) {
         if (entries[second].entry.startTime >= entries[first].entry.endTime) break
         const dateRangesOverlap = entries[first].effectiveFrom <= entries[second].effectiveTo
           && entries[second].effectiveFrom <= entries[first].effectiveTo
-        const sharedAudience = entries[first].assignedUserIds.some(userId => entries[second].assignedUserIds.includes(userId))
+        const sharedAudience = entries[first].selectedUserIds.some(userId => entries[second].selectedUserIds.includes(userId))
         if (entries[first].timetableId !== entries[second].timetableId && dateRangesOverlap && sharedAudience) conflicts += 1
       }
     }

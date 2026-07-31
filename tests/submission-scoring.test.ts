@@ -28,7 +28,7 @@ test('MCQ-only submissions receive an immediate final score', () => {
   assert.equal(result.pendingMarks, 0)
 })
 
-test('question snapshots omit optional undefined Firestore values', () => {
+test('question snapshots omit optional undefined values', () => {
   const snapshot = questionSnapshot({
     id: 'without-explanation',
     kind: 'mcq',

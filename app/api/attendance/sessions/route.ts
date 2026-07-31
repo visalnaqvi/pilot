@@ -1,107 +1,94 @@
-import { errorResponse, requireRole } from '@/lib/admin-api'
-import { adminDb, Timestamp } from '@/lib/firebase-admin'
-import { openAttendanceSchema } from '@/lib/attendance-schema'
-import { attendanceSessionId, isScheduledOccurrence, type AttendanceRosterEntry } from '@/lib/attendance'
-import { canManageAttendance, serializableTimestamp } from '@/lib/attendance-api'
-import { resolveCurrentStudentAudience } from '@/lib/task-api'
-import { localDateKey, type TimetableEntry } from '@/lib/timetable'
+import { and, eq, inArray } from 'drizzle-orm'
+import { z } from 'zod'
+import {
+  attendanceMarks,
+  attendanceSessions,
+  organizationGroupMembers,
+  timetableEntryDays,
+  timetableEntries,
+  timetableVersionGroups,
+  timetableVersions,
+  timetableVersionUsers,
+  timetables,
+} from '@/db/schema'
+import { authenticateRequest, errorResponse } from '@/lib/admin-api'
+import { database } from '@/lib/db'
+import { canManageOrganization } from '@/lib/services/access'
+import { localDateKey, weekdayForDate } from '@/lib/timetable'
 
-export const runtime = 'nodejs'
-
-function serialize(document: FirebaseFirestore.DocumentSnapshot) {
-  const data = document.data()!
-  return {
-    id: document.id,
-    ...data,
-    createdAt: serializableTimestamp(data.createdAt),
-    updatedAt: serializableTimestamp(data.updatedAt),
-    submittedAt: serializableTimestamp(data.submittedAt),
-    cancelledAt: serializableTimestamp(data.cancelledAt),
+const schema = z.object({
+  timetableId: z.string().uuid().optional(),
+  timetableVersionId: z.string().uuid().optional(),
+  entryId: z.string().uuid().optional(),
+  timetableEntryId: z.string().uuid().optional(),
+  classDate: z.string().date(),
+  intent: z.enum(['attendance', 'cancel']).optional().default('attendance'),
+}).superRefine((value, context) => {
+  if (!value.timetableId && !value.timetableVersionId) {
+    context.addIssue({ code: 'custom', path: ['timetableVersionId'], message: 'A timetable is required.' })
   }
-}
+  if (!value.entryId && !value.timetableEntryId) {
+    context.addIssue({ code: 'custom', path: ['timetableEntryId'], message: 'A timetable entry is required.' })
+  }
+})
 
 export async function POST(request: Request) {
-  const auth = await requireRole(request, ['user', 'organisation'])
+  const auth = await authenticateRequest(request)
   if ('error' in auth) return auth.error
   try {
-    const parsed = openAttendanceSchema.safeParse(await request.json().catch(() => null))
-    if (!parsed.success) return Response.json({ error: parsed.error.issues[0]?.message || 'Invalid class occurrence.' }, { status: 400 })
-    const timetableReference = adminDb.collection('timetables').doc(parsed.data.timetableId)
-    const timetable = await timetableReference.get()
-    if (!timetable.exists || timetable.data()?.status !== 'active') {
-      return Response.json({ error: 'Published timetable not found.' }, { status: 404 })
-    }
-    const data = timetable.data()!
-    const entry = (data.entries as TimetableEntry[] | undefined)?.find(item => item.id === parsed.data.entryId)
-    if (!entry || !isScheduledOccurrence({
-      classDate: parsed.data.classDate,
-      effectiveFrom: data.effectiveFrom,
-      effectiveTo: data.effectiveTo,
-      entry,
-    })) return Response.json({ error: 'This class is not scheduled on the selected date.' }, { status: 400 })
-    const timeZone = String(data.timeZone || process.env.APP_TIME_ZONE || 'Asia/Kolkata')
-    if (parsed.data.intent === 'attendance' && parsed.data.classDate > localDateKey(new Date(), timeZone)) {
+    const parsed = schema.safeParse(await request.json())
+    if (!parsed.success) return Response.json({ error: 'Invalid attendance occurrence.', issues: parsed.error.issues }, { status: 400 })
+    const db = database()
+    const entryId = parsed.data.timetableEntryId || parsed.data.entryId!
+    const requestedEntry = (await db.select().from(timetableEntries).where(eq(timetableEntries.id, entryId)).limit(1))[0]
+    const versionId = parsed.data.timetableVersionId || requestedEntry?.versionId
+    const version = versionId
+      ? (await db.select().from(timetableVersions).where(eq(timetableVersions.id, versionId)).limit(1))[0]
+      : null
+    const timetable = version ? (await db.select().from(timetables).where(eq(timetables.id, version.timetableId)).limit(1))[0] : null
+    const entry = version
+      ? (await db.select().from(timetableEntries).where(and(eq(timetableEntries.id, entryId), eq(timetableEntries.versionId, version.id))).limit(1))[0]
+      : null
+    if (
+      !version
+      || !timetable
+      || !entry
+      || (parsed.data.timetableId && timetable.id !== parsed.data.timetableId)
+      || version.state !== 'published'
+      || timetable.status !== 'active'
+    ) return Response.json({ error: 'Published timetable entry not found.' }, { status: 404 })
+    const scheduledDays = await db.select().from(timetableEntryDays).where(eq(timetableEntryDays.entryId, entry.id))
+    if (
+      parsed.data.classDate < version.effectiveFrom
+      || parsed.data.classDate > version.effectiveTo
+      || !scheduledDays.some(item => item.weekday === weekdayForDate(parsed.data.classDate))
+    ) return Response.json({ error: 'This class is not scheduled on the selected date.' }, { status: 400 })
+    if (parsed.data.intent === 'attendance' && parsed.data.classDate > localDateKey(new Date(), version.timeZone)) {
       return Response.json({ error: 'Attendance cannot be recorded for a future class.' }, { status: 400 })
     }
-    if (!await canManageAttendance(auth.user, {
-      organisationId: String(data.organisationId),
-      teacherUserId: entry.teacherUserId,
-    })) return Response.json({ error: 'You cannot take attendance for this class.' }, { status: 403 })
-
-    const id = attendanceSessionId(timetable.id, entry.id, parsed.data.classDate)
-    const reference = adminDb.collection('attendanceSessions').doc(id)
-    const existing = await reference.get()
-    if (existing.exists) return Response.json({ session: serialize(existing), created: false })
-
-    const audience = await resolveCurrentStudentAudience({
-      organisationId: String(data.organisationId),
-      selectedUserIds: Array.isArray(data.selectedUserIds) ? data.selectedUserIds : [],
-      selectedGroupIds: Array.isArray(data.selectedGroupIds) ? data.selectedGroupIds : [],
+    const manager = await canManageOrganization(auth.user, timetable.organizationId)
+    if (!manager && entry.teacherUserId !== auth.user.uid) return Response.json({ error: 'Teacher access required.' }, { status: 403 })
+    const session = await db.transaction(async tx => {
+      const direct = await tx.select().from(timetableVersionUsers).where(eq(timetableVersionUsers.versionId, version.id))
+      const groupIds = (await tx.select().from(timetableVersionGroups).where(eq(timetableVersionGroups.versionId, version.id))).map(item => item.groupId)
+      const groupUsers = groupIds.length ? await tx.select().from(organizationGroupMembers).where(inArray(organizationGroupMembers.groupId, groupIds)) : []
+      const userIds = [...new Set([...direct.map(item => item.userId), ...groupUsers.map(item => item.userId)])]
+      const [session] = await tx.insert(attendanceSessions).values({
+        organizationId: timetable.organizationId,
+        timetableVersionId: version.id,
+        timetableEntryId: entry.id,
+        classDate: parsed.data.classDate,
+        createdBy: auth.user.uid,
+        updatedBy: auth.user.uid,
+      }).onConflictDoUpdate({
+        target: [attendanceSessions.timetableVersionId, attendanceSessions.timetableEntryId, attendanceSessions.classDate],
+        set: { updatedBy: auth.user.uid, updatedAt: new Date() },
+      }).returning()
+      if (userIds.length) await tx.insert(attendanceMarks).values(userIds.map(userId => ({ sessionId: session.id, userId }))).onConflictDoNothing()
+      return session
     })
-    if (!audience.length && parsed.data.intent === 'attendance') {
-      return Response.json({ error: 'This class currently has no accepted students.' }, { status: 400 })
-    }
-    const roster: AttendanceRosterEntry[] = audience
-      .map(student => ({ ...student, status: 'unmarked' as const }))
-      .sort((first, second) => first.userName.localeCompare(second.userName))
-    const now = Timestamp.now()
-    const session = {
-      organisationId: String(data.organisationId),
-      organisationName: String(data.organisationName || data.organisationId),
-      timetableId: timetable.id,
-      timetableName: String(data.name || 'Timetable'),
-      timetableRevision: Number(data.revision || 1),
-      entryId: entry.id,
-      subject: entry.subject,
-      classDate: parsed.data.classDate,
-      startTime: entry.startTime,
-      endTime: entry.endTime,
-      teacherUserId: entry.teacherUserId || '',
-      teacher: entry.teacher || '',
-      timeZone,
-      rosterUserIds: roster.map(student => student.userId),
-      roster,
-      status: 'draft',
-      presentCount: 0,
-      absentCount: 0,
-      cancellationReason: '',
-      revision: 0,
-      createdBy: auth.user.uid,
-      updatedBy: auth.user.uid,
-      createdAt: now,
-      updatedAt: now,
-      submittedAt: null,
-      cancelledAt: null,
-    }
-    try {
-      await reference.create(session)
-      return Response.json({ session: { id, ...session, createdAt: now.toDate().toISOString(), updatedAt: now.toDate().toISOString() }, created: true }, { status: 201 })
-    } catch {
-      const concurrent = await reference.get()
-      if (!concurrent.exists) throw new Error('Unable to open attendance.')
-      return Response.json({ session: serialize(concurrent), created: false })
-    }
+    return Response.json({ id: session.id, session }, { status: 201 })
   } catch (error) {
-    return errorResponse(error, 'Unable to open attendance.')
+    return errorResponse(error, 'Unable to create attendance session.')
   }
 }

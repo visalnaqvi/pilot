@@ -5,26 +5,22 @@ import Link from 'next/link'
 import ReactECharts from 'echarts-for-react'
 import { SearchPicker } from './search-picker'
 import { paginate, Pagination } from './pagination'
-import { collection, getDocs, onSnapshot, query, where } from 'firebase/firestore'
-import { db } from '@/lib/firebase'
+import { authenticatedFetch } from '@/lib/authenticated-fetch'
 import { useAuth } from './auth-context'
 import type { MockTest, Submission } from './test-types'
 import { SubmissionReviewButton } from './submission-answers-modal'
-import { ExamInformationPanel } from './exam-information-panel'
 import { ExamResolver } from './exam-resolver'
 import type { ExamCatalogEntry, ExamSelectionStatus } from '@/lib/exam-catalog'
-import { scopeDashboardExams } from '@/lib/exam-dashboard-scope'
-import { toDate, type ExamCatalogSummary } from '@/lib/exam-information'
 import { AttendanceOverviewCard, StudentAttendancePanel } from './attendance-summary-card'
 
-type Exam = ExamCatalogSummary
+type Exam = ExamCatalogEntry
 type Group = { id: string;
 name: string;
 targetExamId?: string;
 targetExamName?: string;
 members: { userId: string; userEmail?: string; userName?: string }[] }
 type TestAssignment = { id: string; testId: string; userId: string }
-type ExamStats = { exam: Exam;
+type ExamStats = { exam: { id: string; name: string };
 tests: number;
 groups: number;
 groupUsers: number;
@@ -34,11 +30,12 @@ average: number;
 completion: number }
 type ModalTab = 'details' | 'scores' | 'users' | 'groups' | 'goals' | 'attendance'
 const score = (item: Submission) => item.totalMarks ? item.score / item.totalMarks * 100 : 0
-const isUnreadExam = (exam: Exam, lastSeen: unknown) => {
-  const published = toDate(exam.lastPublishedAt)
-  const seen = toDate(lastSeen)
-  return Boolean(published && (!seen || published.valueOf() > seen.valueOf()))
-}
+const withSubmissionDate = (item: Submission): Submission => typeof item.submittedAt === 'string'
+  ? { ...item, submittedAt: { toDate: () => new Date(item.submittedAt as string) } }
+  : item
+const submissionDate = (item: Submission) => typeof item.submittedAt === 'string'
+  ? new Date(item.submittedAt)
+  : item.submittedAt?.toDate()
 
 export function ExamDashboard() {
   const { user, profile } = useAuth();
@@ -49,68 +46,40 @@ const [tests, setTests] = useState<MockTest[]>([]);
 const [groups, setGroups] = useState<Group[]>([]);
 const [submissions, setSubmissions] = useState<Submission[]>([]);
 const [assignments, setAssignments] = useState<TestAssignment[]>([]);
-const [examReads, setExamReads] = useState<Record<string, unknown>>({});
 const [filter, setFilter] = useState('');
 const [opened, setOpened] = useState<ExamStats | null>(null);
 const [error, setError] = useState('')
 const [page, setPage] = useState(1)
 const [addingExam, setAddingExam] = useState(false)
 const [examNotice, setExamNotice] = useState('')
-  useEffect(() => { if (!user || !allowed) return;
-return onSnapshot(collection(db, 'examCatalog'), s => setCatalogExams(s.docs.map(d => ({ id: d.id, ...d.data() }) as Exam).filter(e => e.name).sort((a, b) => a.name.localeCompare(b.name))), e => setError(e.message)) }, [allowed, user])
-  useEffect(() => { if (!user || !allowed) return;
-return onSnapshot(query(collection(db, 'examUpdateReads'), where('userId', '==', user.uid)), s => setExamReads(Object.fromEntries(s.docs.map(d => [d.data().examId as string, d.data().lastSeenPublishedAt]))), e => setError(e.message)) }, [allowed, user])
   useEffect(() => {
     if (!user || !allowed) return
-    if (role === 'admin') {
-      return onSnapshot(
-        collection(db, 'tests'),
-        snapshot => setTests(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as MockTest).filter(test => test.deletedAt == null)),
-        reason => setError(reason.message),
-      )
-    }
-
-    // Firestore rules are not filters. A broad `createdBy == uid` query can be
-    // rejected because access to private tests also depends on organisationId.
-    // Keep every listener constrained to the same fields used by the rules.
-    const testGroups = new Map<string, MockTest[]>()
-    const updateTests = (key: string, items: MockTest[]) => {
-      testGroups.set(key, items)
-      setTests([...testGroups.values()].flat())
-    }
-    const onError = (reason: Error) => setError(reason.message)
-    const stops = [
-      onSnapshot(
-        query(collection(db, 'tests'), where('createdBy', '==', user.uid), where('visibility', '==', 'public'), where('deletedAt', '==', null)),
-        snapshot => updateTests('public', snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as MockTest)),
-        onError,
-      ),
-      onSnapshot(
-        query(collection(db, 'tests'), where('createdBy', '==', user.uid), where('visibility', '==', 'private'), where('organisationId', '==', user.uid), where('deletedAt', '==', null)),
-        snapshot => updateTests('private', snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as MockTest)),
-        onError,
-      ),
-      onSnapshot(
-        query(collection(db, 'tests'), where('createdBy', '==', user.uid), where('visibility', '==', 'assigned'), where('deletedAt', '==', null)),
-        snapshot => updateTests('assigned', snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as MockTest)),
-        onError,
-      ),
-    ]
-    return () => stops.forEach(stop => stop())
-  }, [allowed, role, user])
-  useEffect(() => { if (!user || !allowed) return;
-const source = role === 'admin' ? collection(db, 'organisationGroups') : query(collection(db, 'organisationGroups'), where('organisationId', '==', user.uid));
-return onSnapshot(source, async s => { try { setGroups(await Promise.all(s.docs.map(async d => ({ id: d.id, name: d.data().name as string, targetExamId: d.data().targetExamId as string | undefined, targetExamName: d.data().targetExamName as string | undefined, members: (await getDocs(collection(d.ref, 'members'))).docs.map(m => ({ userId: m.data().userId as string })) })))) } catch { setError('Unable to load batches.') } }, e => setError(e.message)) }, [allowed, role, user])
-  useEffect(() => { if (!user || !allowed) return;
-const source = role === 'admin' ? collection(db, 'submissions') : query(collection(db, 'submissions'), where('organisationIds', 'array-contains', user.uid));
-return onSnapshot(source, s => setSubmissions(s.docs.map(d => ({ id: d.id, ...d.data() }) as Submission).filter(item => item.gradingStatus !== 'pending')), e => setError(e.message)) }, [allowed, role, user])
-  useEffect(() => { if (!user || !allowed) return;
-const source = role === 'admin' ? collection(db, 'testAssignments') : query(collection(db, 'testAssignments'), where('assignedBy', '==', user.uid));
-return onSnapshot(source, s => setAssignments(s.docs.map(d => ({ id: d.id, ...d.data() }) as TestAssignment)), e => setError(e.message)) }, [allowed, role, user])
-  const exams = useMemo(
-    () => scopeDashboardExams(catalogExams, tests, role, user?.uid),
-    [catalogExams, role, tests, user?.uid],
-  )
+    let active = true
+    const organizationQuery = profile?.organizationId ? `?organizationId=${profile.organizationId}` : ''
+    void Promise.all([
+      authenticatedFetch(user, '/api/exams', { cache: 'no-store' }),
+      authenticatedFetch(user, '/api/tests?owned=1', { cache: 'no-store' }),
+      authenticatedFetch(user, `/api/groups${organizationQuery}`, { cache: 'no-store' }),
+      authenticatedFetch(user, '/api/test-submissions', { cache: 'no-store' }),
+      authenticatedFetch(user, `/api/assignments${organizationQuery}`, { cache: 'no-store' }),
+    ]).then(async responses => {
+      const payloads = await Promise.all(responses.map(response => response.json()))
+      const failed = responses.findIndex(response => !response.ok)
+      if (failed >= 0) throw new Error(payloads[failed].error || 'Unable to load dashboard.')
+      if (!active) return
+      setCatalogExams((payloads[0].items || []) as Exam[])
+      setTests((payloads[1].items || []) as MockTest[])
+      setGroups((payloads[2].items || []) as Group[])
+      setSubmissions(((payloads[3].items || []) as Submission[]).filter(item => item.gradingStatus !== 'pending').map(withSubmissionDate))
+      setAssignments((payloads[4].assignments || []).flatMap((assignment: { id: string; testId: string; recipients?: { userId: string }[] }) =>
+        (assignment.recipients || []).map(recipient => ({ id: `${assignment.id}:${recipient.userId}`, testId: assignment.testId, userId: recipient.userId }))))
+      setError('')
+    }).catch(reason => {
+      if (active) setError(reason instanceof Error ? reason.message : 'Unable to load dashboard.')
+    })
+    return () => { active = false }
+  }, [allowed, profile?.organizationId, user])
+  const exams = catalogExams
   const stats = useMemo(() => { const testExam = new Map(tests.map(t => [t.id, t.examId]));
 return exams.map(exam => { const examTests = tests.filter(t => t.examId === exam.id);
 const examGroups = groups.filter(g => g.targetExamId === exam.id || (!g.targetExamId && g.targetExamName === exam.name));
@@ -147,8 +116,8 @@ return { exam, tests: examTests.length, groups: examGroups.length, groupUsers: g
 <span>AVG SCORE</span>
 </div>{visibleExams.items.map(item => <button type="button" key={item.exam.id} onClick={() => setOpened(item)} className="grid w-full gap-3 border-b border-slate-100 px-5 py-5 text-left hover:bg-indigo-50 last:border-0 lg:grid-cols-[minmax(150px,1.4fr)_repeat(6,minmax(75px,1fr))] lg:items-center">
 <div>
-<div className="flex flex-wrap items-center gap-2"><p className="font-bold">{item.exam.name}</p>{isUnreadExam(item.exam, examReads[item.exam.id]) && <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-black uppercase tracking-wide text-rose-700">Updated</span>}</div>
-<p className="mt-1 text-xs text-slate-500">Click for exam details</p>
+<div className="flex flex-wrap items-center gap-2"><p className="font-bold">{item.exam.name}</p></div>
+<p className="mt-1 text-xs text-slate-500">Open performance dashboard</p>
 </div>
 <Cell label="Tests" value={item.tests} />
 
@@ -238,7 +207,7 @@ function AttemptsByDateChart({ exams, tests, groups, submissions }: { exams: Exa
   const selectedGroupUserIds = groupId ? new Set(groups.find(group => group.id === groupId)?.members.map(member => member.userId) || []) : null
   const attempts = submissions.filter(item => (!examId || item.testExamId === examId || testExamIds.get(item.testId) === examId) && (!testId || item.testId === testId) && (!userId || item.userId === userId) && (!selectedGroupUserIds || selectedGroupUserIds.has(item.userId)))
   const daily = new Map<string, number>()
-  attempts.forEach(item => { const date = item.submittedAt?.toDate?.(); if (date) { const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; daily.set(key, (daily.get(key) || 0) + 1) } })
+  attempts.forEach(item => { const date = submissionDate(item); if (date) { const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; daily.set(key, (daily.get(key) || 0) + 1) } })
   const labels = [...daily.keys()].sort()
   const users = [...new Map(submissions.map(item => [item.userId, item.userEmail || item.userId])).entries()].sort((a, b) => a[1].localeCompare(b[1]))
   const option = { tooltip: { trigger: 'axis' }, grid: { left: 42, right: 18, top: 26, bottom: 54 }, xAxis: { type: 'category', data: labels, axisLabel: { rotate: 35 } }, yAxis: { type: 'value', minInterval: 1, name: 'Attempts' }, series: [{ name: 'Attempts', type: 'line', smooth: true, data: labels.map(label => daily.get(label) || 0), areaStyle: { color: '#05966922' }, lineStyle: { color: '#059669', width: 3 }, itemStyle: { color: '#059669' } }] }
@@ -256,7 +225,7 @@ function InsightCard({ icon, label, title, subtitle, detail }: { icon: 'trophy' 
 
 function TrendChart({ title, filterLabel, value, onChange, options, attempts, emptyText }: { title: string; filterLabel: string; value: string; onChange: (value: string) => void; options: { id: string; label: string }[]; attempts: Submission[]; emptyText: string }) {
   const daily = new Map<string, Submission[]>()
-  attempts.forEach(item => { const date = item.submittedAt?.toDate?.(); if (date) { const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; daily.set(key, [...(daily.get(key) || []), item]) } })
+  attempts.forEach(item => { const date = submissionDate(item); if (date) { const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; daily.set(key, [...(daily.get(key) || []), item]) } })
   const labels = [...daily.keys()].sort()
   const option = { tooltip: { trigger: 'axis' }, grid: { left: 44, right: 18, top: 28, bottom: 58 }, xAxis: { type: 'category', data: labels, boundaryGap: false, axisLine: { lineStyle: { color: '#94a3b8' } }, axisTick: { show: false }, axisLabel: { rotate: 40, color: '#64748b' } }, yAxis: { type: 'value', min: 0, max: 100, splitLine: { lineStyle: { color: '#e2e8f0', type: 'dashed' } }, axisLabel: { formatter: '{value}%', color: '#64748b' } }, series: [{ name: 'Average score', type: 'line', smooth: 0.45, symbol: 'circle', symbolSize: 8, data: labels.map(label => Math.round((daily.get(label) || []).reduce((sum, item) => sum + score(item), 0) / (daily.get(label)?.length || 1))), areaStyle: { color: '#7c3aed1f' }, lineStyle: { color: '#6d4aff', width: 3 }, itemStyle: { color: '#fff', borderColor: '#6d4aff', borderWidth: 2 } }] }
   return <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-lg shadow-slate-200/50"><div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between"><div><h2 className="font-black text-slate-950">{title}</h2><p className="mt-1 text-sm text-slate-500">Average percentage for completed submissions.</p></div><div className="w-full sm:w-52"><DashboardPicker label={filterLabel} value={value} options={[{ id: '', label: `All ${filterLabel.toLowerCase()}s` }, ...options]} onChange={onChange} placeholder={`Search ${filterLabel.toLowerCase()}s`} inline /></div></div>{labels.length ? <ReactECharts option={option} style={{ height: 300 }} notMerge lazyUpdate /> : <Empty text={emptyText} />}</section>
@@ -273,7 +242,7 @@ const ownTests = tests.filter(t => t.examId === stats.exam.id);
 const ids = new Set(ownTests.map(t => t.id));
 const attempts = submissions.filter(s => s.testExamId === stats.exam.id || ids.has(s.testId) || s.testExam === stats.exam.name);
 const ownGroups = groups.filter(g => g.targetExamId === stats.exam.id || (!g.targetExamId && g.targetExamName === stats.exam.name));
-const tabs = [['scores', 'Score analysis'], ['details', 'Exam details'], ['users', 'Student list'], ['groups', 'Batch goals']] as const
+const tabs = [['scores', 'Score analysis'], ['users', 'Student list'], ['groups', 'Batch goals']] as const
   if (['scores'].includes(tab)) return <ScoreAnalysisModal stats={stats} attempts={attempts} tests={ownTests} tabs={tabs} setTab={setTab} close={close} />
 
   return <div role="dialog" aria-modal="true" className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-4" onMouseDown={close}>
@@ -286,7 +255,7 @@ const tabs = [['scores', 'Score analysis'], ['details', 'Exam details'], ['users
 <button type="button" onClick={close} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold">Close</button>
 </div>
 <div className="flex overflow-x-auto border-b border-slate-200 px-4">{tabs.map(([id, label]) => <button key={id} type="button" onClick={() => setTab(id)} className={`shrink-0 border-b-2 px-3 py-3 text-sm font-bold ${tab === id ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-slate-500'}`}>{label}</button>)}</div>
-<div className="p-6">{tab === 'details' && <ExamInformationPanel exam={stats.exam} stats={stats} tests={ownTests} />}{tab === 'scores' && <>
+<div className="p-6">{tab === 'scores' && <>
 <div className="grid gap-4 sm:grid-cols-3">
 <ModalStat label="Average score" value={attempts.length ? `${Math.round(stats.average)}%` : '—'} />
 
@@ -320,7 +289,7 @@ function GroupGoals({ attempts, groups }: { attempts: Submission[]; groups: Grou
   const pagedGroups = sortedGroups.slice((currentPage - 1) * pageSize, currentPage * pageSize)
   const toggleSort = (field: 'users' | 'average' | 'attempts') => { setSort((current) => current.field === field ? { field, direction: current.direction === 'asc' ? 'desc' : 'asc' } : { field, direction: 'desc' }); setPage(1) }
   const daily = new Map<string, Submission[]>()
-  combinedAttempts.forEach(attempt => { const date = attempt.submittedAt?.toDate?.(); if (date) { const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; daily.set(key, [...(daily.get(key) || []), attempt]) } })
+  combinedAttempts.forEach(attempt => { const date = submissionDate(attempt); if (date) { const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; daily.set(key, [...(daily.get(key) || []), attempt]) } })
   const labels = [...daily.keys()].sort()
   const lineOption = { tooltip: { trigger: 'axis' }, grid: { left: 42, right: 18, top: 28, bottom: 48 }, xAxis: { type: 'category', data: labels, axisLabel: { rotate: 35 } }, yAxis: { type: 'value', min: 0, max: 100, axisLabel: { formatter: '{value}%' } }, series: [{ name: 'Average score', type: 'line', smooth: true, data: labels.map(label => Math.round((daily.get(label) || []).reduce((sum, attempt) => sum + score(attempt), 0) / (daily.get(label)?.length || 1))), areaStyle: { color: '#4f46e522' }, lineStyle: { color: '#4f46e5', width: 3 }, itemStyle: { color: '#4f46e5' } }] }
   const attemptsByDateOption = { tooltip: { trigger: 'axis' }, grid: { left: 42, right: 18, top: 28, bottom: 48 }, xAxis: { type: 'category', data: labels, axisLabel: { rotate: 35 } }, yAxis: { type: 'value', minInterval: 1, name: 'Attempts' }, series: [{ name: 'Attempts', type: 'line', smooth: true, data: labels.map(label => (daily.get(label) || []).length), areaStyle: { color: '#05966922' }, lineStyle: { color: '#059669', width: 3 }, itemStyle: { color: '#059669' } }] }
@@ -347,7 +316,7 @@ function ExamUserList({ attempts, tests, groups, assignments, dashboardType = 'e
   const activeUser = users.find((user) => user.id === selectedUserId)
   const trendAttempts = (activeUser ? activeUser.attempts : attempts).filter((attempt) => !selectedTestId || attempt.testId === selectedTestId)
   const daily = new Map<string, Submission[]>()
-  trendAttempts.forEach((attempt) => { const date = attempt.submittedAt?.toDate?.(); if (date) { const key = date.toLocaleDateString(); daily.set(key, [...(daily.get(key) || []), attempt]) } })
+  trendAttempts.forEach((attempt) => { const date = submissionDate(attempt); if (date) { const key = date.toLocaleDateString(); daily.set(key, [...(daily.get(key) || []), attempt]) } })
   const labels = [...daily.keys()]
   const chartOption = { tooltip: { trigger: 'axis' }, grid: { left: 38, right: 16, top: 28, bottom: 48 }, xAxis: { type: 'category', data: labels, axisLabel: { rotate: 35 } }, yAxis: { type: 'value', min: 0, max: 100 }, series: [{ name: 'Average score', type: 'line', smooth: true, data: labels.map((label) => { const values = daily.get(label) || []; return Math.round(values.reduce((sum, item) => sum + score(item), 0) / values.length) }), areaStyle: { color: '#4f46e522' }, lineStyle: { color: '#4f46e5', width: 3 }, itemStyle: { color: '#4f46e5' } }] }
   const participation = assignedUsers.size ? Math.round(rankedUsers.length / assignedUsers.size * 100) : 0
@@ -431,7 +400,7 @@ const attempts = selectedTestId ? examAttempts.filter(item => item.testId === se
 const stats = { ...examStats, average: attempts.length ? attempts.reduce((sum, item) => sum + score(item), 0) / attempts.length : 0, students: new Set(attempts.map(item => item.userId)).size };
 const selectedTest = tests.find(test => test.id === selectedTestId);
 const daily = new Map<string, Submission[]>();
-attempts.forEach(item => { const date = item.submittedAt?.toDate?.();
+attempts.forEach(item => { const date = submissionDate(item);
 if (date) { const key = date.toLocaleDateString();
 daily.set(key, [...(daily.get(key) || []), item]) } });
 const labels = [...daily.keys()];
@@ -503,34 +472,15 @@ export function TestDashboardModal({ test, close }: { test: MockTest; close: () 
   const [error, setError] = useState('')
   useEffect(() => {
     if (!user || !profile) return
-    if (profile.role === 'user') {
-      let active = true
-      void user.getIdToken().then(async token => {
-        const response = await fetch(`/api/test-submissions?testId=${encodeURIComponent(test.id)}`, {
-          headers: { authorization: `Bearer ${token}` },
-        })
-        const payload = await response.json().catch(() => ({})) as {
-          submissions?: Array<Omit<Submission, 'submittedAt'> & { submittedAt?: string | null }>
-          error?: string
-        }
-        if (!response.ok) throw new Error(payload.error || 'Unable to load test dashboard data.')
-        if (!active) return
-        setSubmissions((payload.submissions || []).map(item => {
-          const { submittedAt, ...submission } = item
-          return {
-            ...submission,
-            ...(submittedAt ? { submittedAt: { toDate: () => new Date(submittedAt) } } : {}),
-          }
-        }))
-      }).catch(reason => {
-        if (active) setError(reason instanceof Error ? reason.message : 'Unable to load test dashboard data.')
-      })
-      return () => { active = false }
-    }
-    const source = profile.role === 'admin'
-      ? query(collection(db, 'submissions'), where('testId', '==', test.id))
-      : query(collection(db, 'submissions'), where('testId', '==', test.id), where('organisationIds', 'array-contains', user.uid))
-    return onSnapshot(source, snapshot => setSubmissions(snapshot.docs.map(item => ({ id: item.id, ...item.data() }) as Submission).filter(item => item.gradingStatus !== 'pending')), reason => setError(reason.message))
+    let active = true
+    void authenticatedFetch(user, '/api/test-submissions', { cache: 'no-store' }).then(async response => {
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || 'Unable to load test dashboard data.')
+      if (active) setSubmissions(((payload.items || []) as Submission[]).filter(item => item.testId === test.id && item.gradingStatus !== 'pending').map(withSubmissionDate))
+    }).catch(reason => {
+      if (active) setError(reason instanceof Error ? reason.message : 'Unable to load test dashboard data.')
+    })
+    return () => { active = false }
   }, [profile, test.id, user])
   const [tab, setTab] = useState<ModalTab>('scores')
   const canEdit = profile?.role === 'admin'
@@ -580,7 +530,7 @@ function ExamGoalProgress({ goals, attempts, tests }: { goals: { id: string; nam
     const values = goalAttempts.map(score)
     const average = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0
     const daily = new Map<string, number>()
-    goalAttempts.forEach(item => { const date = item.submittedAt?.toDate?.(); if (date) { const key = date.toLocaleDateString(); daily.set(key, (daily.get(key) || 0) + 1) } })
+    goalAttempts.forEach(item => { const date = submissionDate(item); if (date) { const key = date.toLocaleDateString(); daily.set(key, (daily.get(key) || 0) + 1) } })
     const labels = [...daily.keys()]
     const option = { tooltip: { trigger: 'axis' }, grid: { left: 42, right: 18, top: 28, bottom: 48 }, xAxis: { type: 'category', data: labels, axisLabel: { rotate: 35 } }, yAxis: { type: 'value', minInterval: 1, name: 'Tests' }, series: [{ name: 'Tests taken', type: 'line', smooth: true, data: labels.map(label => daily.get(label) || 0), areaStyle: { color: '#05966922' }, lineStyle: { color: '#059669', width: 3 }, itemStyle: { color: '#059669' } }] }
     return <article key={goal.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-600">Exam goal</p><h4 className="mt-1 text-xl font-black text-slate-950">{goal.examName || 'Unassigned exam'}</h4><p className="mt-1 text-sm text-slate-500">Assigned through {goal.name}</p></div><p className="text-sm font-semibold text-slate-500">{new Set(goalAttempts.map(item => item.testId)).size} unique test{new Set(goalAttempts.map(item => item.testId)).size === 1 ? '' : 's'}</p></div><div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4"><ModalStat label="Attempts" value={goalAttempts.length} /><ModalStat label="Average score" value={values.length ? `${Math.round(average)}%` : '—'} /><ModalStat label="Lowest score" value={values.length ? `${Math.round(Math.min(...values))}%` : '—'} /><ModalStat label="Highest score" value={values.length ? `${Math.round(Math.max(...values))}%` : '—'} /></div><div className="mt-6">{labels.length ? <Chart title="Tests taken by date" option={option} labels={[]} onDateSelect={() => undefined} /> : <Empty text="A dated submission for this exam is needed to show progress by date." />}</div></article>
@@ -664,6 +614,3 @@ value: string | number }) { return <div className="rounded-xl bg-indigo-50 p-4">
 <p className="mt-2 text-2xl font-black">{value}</p>
 </div> }
 function Empty({ text }: { text: string }) { return <p className="mt-3 rounded-xl bg-slate-50 p-4 text-sm text-slate-500">{text}</p> }
-
-
-

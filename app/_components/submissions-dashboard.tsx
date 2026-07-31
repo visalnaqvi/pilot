@@ -1,8 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { collection, doc, getDoc, onSnapshot, query, where } from 'firebase/firestore'
-import { db } from '@/lib/firebase'
+import { authenticatedFetch } from '@/lib/authenticated-fetch'
 import { useAuth } from './auth-context'
 import { SearchPicker } from './search-picker'
 import { paginate, Pagination } from './pagination'
@@ -12,7 +11,10 @@ import { SubmissionAnswersModal } from './submission-answers-modal'
 type Invite = { organisationId: string; organisationEmail: string; status: 'accepted' | 'pending' | 'declined' }
 type TestMetadata = { exam: string; category: string }
 
-const dateOf = (submission: Submission) => submission.submittedAt?.toDate?.()
+const dateOf = (submission: Submission) => {
+  if (!submission.submittedAt) return undefined
+  return typeof submission.submittedAt === 'string' ? new Date(submission.submittedAt) : submission.submittedAt.toDate()
+}
 const formatDate = (submission: Submission) => dateOf(submission)?.toLocaleString() ?? 'Saving…'
 
 export function SubmissionsDashboard({ initialSubmissionId, initialUserId }: { initialSubmissionId?: string; initialUserId?: string }) {
@@ -35,32 +37,41 @@ export function SubmissionsDashboard({ initialSubmissionId, initialUserId }: { i
 
   useEffect(() => {
     if (!user) return
-    const source = role === 'admin' ? collection(db, 'submissions') : role === 'organisation' ? query(collection(db, 'submissions'), where('organisationIds', 'array-contains', user.uid)) : query(collection(db, 'submissions'), where('userId', '==', user.uid))
-    return onSnapshot(source, (snapshot) => {
-      const loaded = snapshot.docs.map((item) => ({ id: item.id, ...item.data() }) as Submission).sort((a, b) => (dateOf(b)?.getTime() ?? 0) - (dateOf(a)?.getTime() ?? 0))
+    let active = true
+    void Promise.all([
+      authenticatedFetch(user, '/api/test-submissions', { cache: 'no-store' }),
+      authenticatedFetch(user, '/api/tests', { cache: 'no-store' }),
+      authenticatedFetch(user, '/api/organizations', { cache: 'no-store' }),
+    ]).then(async ([submissionResponse, testResponse, organizationResponse]) => {
+      const [submissionData, testData, organizationData] = await Promise.all([
+        submissionResponse.json(),
+        testResponse.json(),
+        organizationResponse.json(),
+      ])
+      if (!submissionResponse.ok) throw new Error(submissionData.error || 'Unable to load submissions.')
+      if (!testResponse.ok) throw new Error(testData.error || 'Unable to load tests.')
+      if (!active) return
+      const loaded = ((submissionData.items || []) as Submission[]).sort((a, b) => (dateOf(b)?.getTime() ?? 0) - (dateOf(a)?.getTime() ?? 0))
       setSubmissions(loaded)
+      setTestMetadata(Object.fromEntries((testData.items || []).map((item: { id: string; exam?: string; category?: string }) => [
+        item.id,
+        { exam: item.exam || 'Unassigned', category: item.category || 'Uncategorised' },
+      ])))
+      if (organizationResponse.ok) {
+        setInvites((organizationData.items || []).map((item: { id: string; name: string }) => ({
+          organisationId: item.id,
+          organisationEmail: item.name,
+          status: 'accepted' as const,
+        })))
+      }
       const requestedSubmission = initialSubmissionId ? loaded.find((item) => item.id === initialSubmissionId) : undefined
       if (requestedSubmission) setReviewing(requestedSubmission)
       setError('')
-    }, (reason) => setError(`Could not load submissions: ${reason.message}`))
-  }, [initialSubmissionId, role, user])
-
-  useEffect(() => {
-    let active = true
-    const testIds = [...new Set(submissions.map((item) => item.testId))]
-    if (testIds.length === 0) return
-    void Promise.all(testIds.map(async (id) => {
-      const result = await getDoc(doc(db, 'tests', id))
-      const data = result.exists() ? result.data() : null
-      return [id, { exam: typeof data?.exam === 'string' ? data.exam : 'Unassigned', category: typeof data?.category === 'string' ? data.category : 'Uncategorised' }] as const
-    })).then((entries) => { if (active) setTestMetadata(Object.fromEntries(entries)) }).catch(() => { if (active) setTestMetadata({}) })
+    }).catch(reason => {
+      if (active) setError(`Could not load submissions: ${reason instanceof Error ? reason.message : 'Unknown error'}`)
+    })
     return () => { active = false }
-  }, [submissions])
-
-  useEffect(() => {
-    if (!user || role !== 'user') return
-    return onSnapshot(query(collection(db, 'organisationInvites'), where('userId', '==', user.uid)), (snapshot) => setInvites(snapshot.docs.map((item) => item.data() as Invite).filter((item) => item.status === 'accepted')))
-  }, [role, user])
+  }, [initialSubmissionId, user])
 
   const tests = useMemo(() => [...new Map(submissions.map((item) => [item.testId, item.testTitle])).entries()], [submissions])
   const submissionExam = (item: Submission) => testMetadata[item.testId]?.exam || item.testExam || 'Unassigned'
@@ -79,12 +90,12 @@ export function SubmissionsDashboard({ initialSubmissionId, initialUserId }: { i
   }, [submissions])
   const organisations = useMemo(() => {
     const labels = new Map(invites.map((item) => [item.organisationId, item.organisationEmail]))
-    submissions.flatMap((item) => item.organisationIds ?? []).forEach((id) => { if (!labels.has(id)) labels.set(id, id) })
+    submissions.flatMap((item) => item.organizationIds ?? []).forEach((id) => { if (!labels.has(id)) labels.set(id, id) })
     return [...labels.entries()]
   }, [invites, submissions])
   const filtered = submissions.filter((item) => {
     const date = dateOf(item)
-    return (!testId || item.testId === testId) && (!exam || submissionExam(item) === exam) && (!category || submissionCategory(item) === category) && (!userId || item.userId === userId) && (!organisationId || item.organisationIds?.includes(organisationId)) && (!from || (date && date >= new Date(`${from}T00:00:00`))) && (!to || (date && date <= new Date(`${to}T23:59:59.999`)))
+    return (!testId || item.testId === testId) && (!exam || submissionExam(item) === exam) && (!category || submissionCategory(item) === category) && (!userId || item.userId === userId) && (!organisationId || item.organizationIds?.includes(organisationId)) && (!from || (date && date >= new Date(`${from}T00:00:00`))) && (!to || (date && date <= new Date(`${to}T23:59:59.999`)))
   }).sort((a, b) => {
     const scoreOf = (item: Submission) => item.totalMarks ? item.score / item.totalMarks : 0
     if (sortBy !== 'newest' && (a.gradingStatus === 'pending') !== (b.gradingStatus === 'pending')) return a.gradingStatus === 'pending' ? 1 : -1
@@ -155,7 +166,7 @@ function SubmissionCard({ submission, exam, openAnswers }: { submission: Submiss
       <div className="border-t border-slate-100 pt-5 text-sm text-slate-500 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
         <p className="flex items-center gap-2"><CalendarIcon />{formatDate(submission)}</p>
         <p className="mt-3 flex items-center gap-2"><CheckIcon />{submission.correctAnswers}/{submission.questionCount} correct</p>
-        {submission.answers?.length ? <button type="button" onClick={openAnswers} className="mt-4 inline-flex items-center gap-1.5 text-sm font-bold text-indigo-600 hover:text-indigo-800">View answers <span aria-hidden="true">›</span></button> : <p className="mt-4 text-xs text-slate-400">Answer detail unavailable</p>}
+        <button type="button" onClick={openAnswers} className="mt-4 inline-flex items-center gap-1.5 text-sm font-bold text-indigo-600 hover:text-indigo-800">View answers <span aria-hidden="true">›</span></button>
       </div>
     </div>
   </article>

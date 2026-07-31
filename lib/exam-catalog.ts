@@ -7,11 +7,18 @@ export type ExamCatalogEntry = {
 
 export type ExamResolution =
   | { status: 'matches'; exams: ExamCatalogEntry[] }
-  | { status: 'proposed'; exam: ExamCatalogEntry }
+  | { status: 'proposed'; exam: ExamCatalogEntry; source?: 'ai' | 'input' }
   | { status: 'selected'; exam: ExamCatalogEntry }
   | { status: 'created'; exam: ExamCatalogEntry }
 
 export type ExamSelectionStatus = 'selected' | 'created'
+
+export type ExamCatalogSuggestion = {
+  recognized: boolean
+  canonicalName: string
+  primaryAlias: string
+  aliases: string[]
+}
 
 export function normalizeExamKey(value: string) {
   return value
@@ -46,4 +53,23 @@ export function cleanAliases(name: string, aliases: unknown) {
       return true
     })
     .slice(0, 12)
+}
+
+export function prepareExamCatalogProposal(searchName: string, suggestion?: ExamCatalogSuggestion) {
+  const searched = searchName.trim()
+  if (!suggestion?.recognized) {
+    return { name: searched, primaryAlias: searched, aliases: [] }
+  }
+
+  const name = suggestion.canonicalName.trim() || searched
+  const aliases = cleanAliases(name, [
+    suggestion.primaryAlias,
+    ...suggestion.aliases,
+    searched,
+  ])
+  const requestedPrimaryKey = normalizeExamKey(suggestion.primaryAlias)
+  const primaryAlias = aliases.find(alias => normalizeExamKey(alias) === requestedPrimaryKey)
+    || aliases[0]
+    || name
+  return { name, primaryAlias, aliases }
 }

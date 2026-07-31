@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useAuth } from './auth-context'
 import type { Submission, SubmissionAnswer } from './test-types'
+import { authenticatedFetch } from '@/lib/authenticated-fetch'
 
 type GradeDraft = Record<number, { awardedMarks: number; feedback: string }>
 
@@ -20,8 +21,7 @@ export function SubmissionAnswersModal({ submission: initialSubmission, close }:
     const controller = new AbortController()
     void (async () => {
       try {
-        const response = await fetch(`/api/test-submissions/${encodeURIComponent(initialSubmission.id)}`, {
-          headers: { authorization: `Bearer ${await user.getIdToken()}` },
+        const response = await authenticatedFetch(user, `/api/test-submissions/${encodeURIComponent(initialSubmission.id)}`, {
           signal: controller.signal,
         })
         const payload = await response.json().catch(() => ({})) as { submission?: Submission; canGrade?: boolean; error?: string }
@@ -48,17 +48,13 @@ export function SubmissionAnswersModal({ submission: initialSubmission, close }:
     setSaving(true)
     setMessage('')
     try {
-      const response = await fetch(`/api/test-submissions/${encodeURIComponent(submission.id)}`, {
+      const response = await authenticatedFetch(user, `/api/test-submissions/${encodeURIComponent(submission.id)}`, {
         method: 'PATCH',
-        headers: {
-          authorization: `Bearer ${await user.getIdToken()}`,
-          'content-type': 'application/json',
-        },
         body: JSON.stringify({
-          grades: Object.entries(grades).map(([questionIndex, grade]) => ({
-            questionIndex: Number(questionIndex),
-            ...grade,
-          })),
+          answers: (submission.answers || []).flatMap(answer => {
+            const grade = grades[answer.questionIndex]
+            return grade && answer.id ? [{ id: answer.id, ...grade }] : []
+          }),
         }),
       })
       const payload = await response.json().catch(() => ({})) as { error?: string; score?: number }
@@ -94,7 +90,7 @@ export function SubmissionAnswersModal({ submission: initialSubmission, close }:
         <button type="button" onClick={close} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold">Close</button>
       </div>
       <div className="space-y-4 p-6">
-        {loading ? <p className="text-slate-500">Loading private answer details…</p> : answers.map(answer => (
+        {loading ? <p className="text-slate-500">Loading private answer details…</p> : answers.length ? answers.map(answer => (
           <AnswerCard
             key={answer.questionIndex}
             answer={answer}
@@ -102,7 +98,7 @@ export function SubmissionAnswersModal({ submission: initialSubmission, close }:
             grade={grades[answer.questionIndex]}
             setGrade={(grade) => setGrades(current => ({ ...current, [answer.questionIndex]: grade }))}
           />
-        ))}
+        )) : !message && <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-600">No saved answers were found for this submission.</p>}
         {message && <p className={`rounded-xl p-4 text-sm ${message.startsWith('Short answers') ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>{message}</p>}
         {canGrade && <button type="button" disabled={saving} onClick={() => void saveGrades()} className="w-full rounded-xl bg-indigo-600 px-5 py-3 font-bold text-white disabled:opacity-50">{saving ? 'Saving grades…' : 'Release final grade'}</button>}
       </div>
