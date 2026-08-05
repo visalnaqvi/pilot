@@ -1,14 +1,18 @@
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
+import path from 'node:path'
 import test from 'node:test'
 import { createBrandPalette, getBrandConfig, getBrandCssVariables, normalizeHexColor, normalizeLogoUrl, resolveBrandConfig } from '../lib/branding'
 
-test('branding reads the branch-owned MockPilot configuration', () => {
+test('branding reads a valid branch-owned configuration and local logo', () => {
   const brand = getBrandConfig()
-  assert.equal(brand.name, 'MockPilot')
-  assert.equal(brand.shortName, 'MOCKPILOT')
-  assert.equal(brand.primaryColor, '#4f46e5')
-  assert.equal(brand.accentColor, '#7c3aed')
-  assert.equal(brand.logoUrl, undefined)
+  assert.ok(brand.name)
+  assert.ok(brand.shortName)
+  assert.match(brand.primaryColor, /^#[0-9a-f]{6}$/)
+  assert.match(brand.secondaryColor, /^#[0-9a-f]{6}$/)
+  if (brand.logoUrl?.startsWith('/')) {
+    assert.equal(existsSync(path.join(process.cwd(), 'public', brand.logoUrl)), true)
+  }
 })
 
 test('branding accepts a client identity and normalizes its colors', () => {
@@ -17,7 +21,7 @@ test('branding accepts a client identity and normalizes its colors', () => {
     shortName: 'EA',
     logoUrl: '/branding/example.svg',
     primaryColor: '#086',
-    accentColor: '#EA580C',
+    secondaryColor: '#E9F5E9',
     tagline: 'Learn with confidence.',
   })
 
@@ -27,21 +31,22 @@ test('branding accepts a client identity and normalizes its colors', () => {
     logoUrl: '/branding/example.svg',
     logoAlt: 'Example Academy logo',
     primaryColor: '#008866',
-    accentColor: '#ea580c',
+    secondaryColor: '#e9f5e9',
     tagline: 'Learn with confidence.',
     description: 'Create and take practice mock tests.',
   })
 })
 
-test('branding creates complete primary and accent shade variables', () => {
-  const brand = resolveBrandConfig({ primaryColor: '#0f766e', accentColor: '#ea580c' })
+test('branding creates a complete palette anchored by primary and secondary colors', () => {
+  const brand = resolveBrandConfig({ primaryColor: '#0f766e', secondaryColor: '#e9f5e9' })
   const variables = getBrandCssVariables(brand)
-  const primary = createBrandPalette('#0f766e')
+  const primary = createBrandPalette('#0f766e', '#e9f5e9')
 
   assert.equal(variables['--brand-primary'], '#0f766e')
+  assert.equal(variables['--brand-secondary'], '#e9f5e9')
   assert.equal(variables['--color-indigo-50'], primary[50])
   assert.equal(variables['--color-indigo-600'], '#0f766e')
-  assert.equal(variables['--color-violet-600'], '#ea580c')
+  assert.equal(variables['--color-violet-600'], '#0f766e')
   assert.equal(Object.keys(variables).length, 24)
 })
 

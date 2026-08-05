@@ -247,9 +247,9 @@ function UserExamModal({
         const dateAttempts = daily.get(label) || []
         return Math.round(dateAttempts.reduce((sum, item) => sum + scorePercent(item), 0) / (dateAttempts.length || 1))
       }),
-      areaStyle: { color: `${brand.accentColor}20` },
-      lineStyle: { color: brand.accentColor, width: 3 },
-      itemStyle: { color: '#fff', borderColor: brand.accentColor, borderWidth: 2 },
+      areaStyle: { color: `${brand.primaryColor}20` },
+      lineStyle: { color: brand.primaryColor, width: 3 },
+      itemStyle: { color: '#fff', borderColor: brand.primaryColor, borderWidth: 2 },
     }],
   }
   const attemptsByDateOption = {

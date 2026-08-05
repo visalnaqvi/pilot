@@ -4,7 +4,7 @@ export type BrandingDefinition = {
   logoUrl?: string
   logoAlt?: string
   primaryColor?: string
-  accentColor?: string
+  secondaryColor?: string
   tagline?: string
   description?: string
 }
@@ -17,15 +17,14 @@ export type BrandingDefinition = {
  * Absolute HTTP(S) logo URLs are supported too.
  */
 const branding = {
-  name: 'MockPilot',
-  shortName: 'MOCKPILOT',
-  logoUrl: '',
-  logoAlt: 'MockPilot logo',
-  primaryColor: '#4f46e5',
-  accentColor: '#7c3aed',
+  name: 'Aggarwal Education Center',
+  shortName: 'AEC',
+  logoUrl: '/aggarwaleducation/Aggarwal-Education-Center-Logo.png',
+  logoAlt: 'Aggarwal Education Center logo',
+  primaryColor: '#055527',
+  secondaryColor: '#e9f5e9',
   tagline: 'Practice with purpose.',
-  description: 'Create and take practice mock tests.',
+  description: 'Create and take practice mock tests with Aggarwal Education Center.',
 } satisfies BrandingDefinition
 
 export default branding
-

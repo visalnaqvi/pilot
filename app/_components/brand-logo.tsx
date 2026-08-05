@@ -7,10 +7,10 @@ export function BrandLogo({ inverse = false, className = '' }: { inverse?: boole
 
   if (brand.logoUrl) {
     return (
-      <span className={`inline-flex max-w-48 items-center rounded-md ${inverse ? 'bg-white/95 px-2.5 py-1.5' : ''} ${className}`}>
+      <span className={`inline-flex max-w-56 items-center rounded-md ${inverse ? 'bg-white/95 px-2.5 py-1.5' : ''} ${className}`}>
         {/* A deployment-controlled URL supports local public assets and client-hosted logos. */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={brand.logoUrl} alt={brand.logoAlt} className="h-8 w-auto max-w-full object-contain" />
+        <img src={brand.logoUrl} alt={brand.logoAlt} className="h-10 w-auto max-w-full object-contain" />
       </span>
     )
   }

@@ -6,7 +6,7 @@ export type BrandConfig = {
   logoUrl?: string
   logoAlt: string
   primaryColor: string
-  accentColor: string
+  secondaryColor: string
   tagline: string
   description: string
 }
@@ -15,7 +15,7 @@ const DEFAULT_BRAND = {
   name: 'MockPilot',
   shortName: 'MOCKPILOT',
   primaryColor: '#4f46e5',
-  accentColor: '#7c3aed',
+  secondaryColor: '#eef2ff',
   tagline: 'Practice with purpose.',
   description: 'Create and take practice mock tests.',
 } as const
@@ -65,21 +65,32 @@ function mixHex(color: string, target: string, amount: number) {
   return `#${mixed.map(value => value.toString(16).padStart(2, '0')).join('')}`
 }
 
-export function createBrandPalette(color: string) {
-  return Object.fromEntries(Object.entries(paletteSteps).map(([shade, step]) => (
+export function createBrandPalette(color: string, secondaryColor?: string) {
+  const palette = Object.fromEntries(Object.entries(paletteSteps).map(([shade, step]) => (
     [shade, mixHex(color, step.target, step.amount)]
   ))) as Record<keyof typeof paletteSteps, string>
+
+  if (secondaryColor) {
+    palette[50] = secondaryColor
+    palette[100] = mixHex(secondaryColor, color, 0.08)
+    palette[200] = mixHex(secondaryColor, color, 0.22)
+    palette[300] = mixHex(secondaryColor, color, 0.4)
+    palette[400] = mixHex(secondaryColor, color, 0.65)
+  }
+
+  return palette
 }
 
 export function resolveBrandConfig(definition: BrandingDefinition): BrandConfig {
   const name = valueOrDefault(definition.name, DEFAULT_BRAND.name)
+  const primaryColor = normalizeHexColor(definition.primaryColor, DEFAULT_BRAND.primaryColor)
   return {
     name,
     shortName: valueOrDefault(definition.shortName, name.toUpperCase()),
     logoUrl: normalizeLogoUrl(definition.logoUrl),
     logoAlt: valueOrDefault(definition.logoAlt, `${name} logo`),
-    primaryColor: normalizeHexColor(definition.primaryColor, DEFAULT_BRAND.primaryColor),
-    accentColor: normalizeHexColor(definition.accentColor, DEFAULT_BRAND.accentColor),
+    primaryColor,
+    secondaryColor: normalizeHexColor(definition.secondaryColor, createBrandPalette(primaryColor)[50]),
     tagline: valueOrDefault(definition.tagline, DEFAULT_BRAND.tagline),
     description: valueOrDefault(definition.description, DEFAULT_BRAND.description),
   }
@@ -90,14 +101,13 @@ export function getBrandConfig() {
 }
 
 export function getBrandCssVariables(brand: BrandConfig) {
-  const primary = createBrandPalette(brand.primaryColor)
-  const accent = createBrandPalette(brand.accentColor)
+  const primary = createBrandPalette(brand.primaryColor, brand.secondaryColor)
   const variables: Record<`--${string}`, string> = {
     '--brand-primary': brand.primaryColor,
-    '--brand-accent': brand.accentColor,
+    '--brand-secondary': brand.secondaryColor,
   }
 
   for (const [shade, color] of Object.entries(primary)) variables[`--color-indigo-${shade}`] = color
-  for (const [shade, color] of Object.entries(accent)) variables[`--color-violet-${shade}`] = color
+  for (const [shade, color] of Object.entries(primary)) variables[`--color-violet-${shade}`] = color
   return variables
 }

@@ -18,7 +18,7 @@ Keep the Firebase Admin variables for ID-token verification and signed Storage o
 
 ## Per-client branding
 
-Branding is configured in `config/branding.ts`, which is committed with the branch. Checking out a client branch therefore switches its logo, identity, and palette without changing local environment variables. The primary and accent colors automatically produce the full shade scales used by buttons, links, tabs, focus states, calendars, charts, and badges.
+Branding is configured in `config/branding.ts`, which is committed with the branch. Checking out a client branch therefore switches its logo, identity, and palette without changing local environment variables. The primary and secondary colors automatically produce the full shade scales used by buttons, links, tabs, focus states, calendars, charts, and badges. Light secondary colors are used for tinted surfaces while the primary color remains the contrast-safe button, text, and chart color.
 
 ```ts
 const branding = {
@@ -27,7 +27,7 @@ const branding = {
   logoUrl: '/example-academy/logo.svg',
   logoAlt: 'Example Academy',
   primaryColor: '#0f766e',
-  accentColor: '#ea580c',
+  secondaryColor: '#e9f5e9',
   tagline: 'Learn with confidence.',
   description: 'Practice tests from Example Academy.',
 }
