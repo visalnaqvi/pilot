@@ -11,6 +11,7 @@ import {
   VerificationSchema,
   canTransitionGeneration,
   repairGeneratedMcqContent,
+  shuffleMcqOptions,
 } from '../lib/test-generation/schema'
 
 const reference = {
@@ -98,6 +99,23 @@ test('generated MCQs have four distinct options and valid inference labels', () 
     descriptionSuggestion: '',
     questions: [mcq('q1'), { ...mcq('q2'), options: ['A', 'A', 'B', 'C'] }, mcq('q3'), mcq('q4'), mcq('q5')],
   }).success, false)
+})
+
+test('MCQ option shuffling preserves the answer and can place it in any option slot', () => {
+  const placements = [
+    { target: 0, samples: [0.99, 0.99, 0.99] },
+    { target: 1, samples: [0.99, 0.99, 0] },
+    { target: 2, samples: [0.99, 0, 0.99] },
+    { target: 3, samples: [0, 0.99, 0.99] },
+  ]
+
+  for (const placement of placements) {
+    let sampleIndex = 0
+    const shuffled = shuffleMcqOptions(mcq('q1'), () => placement.samples[sampleIndex++])
+    assert.equal(shuffled.correctAnswer, placement.target)
+    assert.equal(shuffled.options[shuffled.correctAnswer], 'Mitochondrion')
+    assert.deepEqual([...shuffled.options].sort(), [...mcq('q1').options].sort())
+  }
 })
 
 test('damaged edited MCQs recover required generated metadata before publication', () => {

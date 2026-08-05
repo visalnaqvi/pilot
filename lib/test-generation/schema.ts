@@ -98,6 +98,22 @@ export const GeneratedMcqSchema = GeneratedQuestionBaseSchema.extend({
   explanation: z.string().min(1).max(4000),
 })
 
+export function shuffleMcqOptions<T extends { options: string[]; correctAnswer: number }>(
+  content: T,
+  random: () => number = Math.random,
+): T {
+  const options = content.options.map((option, originalIndex) => ({ option, originalIndex }))
+  for (let index = options.length - 1; index > 0; index -= 1) {
+    const target = Math.floor(random() * (index + 1))
+    ;[options[index], options[target]] = [options[target], options[index]]
+  }
+  return {
+    ...content,
+    options: options.map(item => item.option),
+    correctAnswer: options.findIndex(item => item.originalIndex === content.correctAnswer),
+  }
+}
+
 export function repairGeneratedMcqContent(
   content: unknown,
   defaults: {

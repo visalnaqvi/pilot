@@ -12,6 +12,7 @@ import { MathText, MathTextEditor } from './math-components'
 import { SearchPicker } from './search-picker'
 import type { LearnerQuestion, MockTest, QuestionContent, QuestionFormat } from './test-types'
 import type { ExamCatalogEntry, ExamSelectionStatus } from '@/lib/exam-catalog'
+import { shouldUseStandardTestEditor } from '@/lib/test-editing'
 import { useTeacherOrganisations } from './use-teacher-organisations'
 
 type DraftQuestion = { key: string;
@@ -310,7 +311,7 @@ const response = await authenticatedFetch(user, '/api/tests', { method: 'PATCH',
 if (!response.ok) throw new Error((await response.json()).error || 'Unable to delete this test.');
 router.push('/tests') } catch (reason) { setMessage(reason instanceof Error ? reason.message : 'Unable to delete this test.') } finally { setDeleting(false) } } if (!test || teacherOrganisationsLoading) return <p className="text-slate-500">Loading test…</p>;
 if (!canManage) return <section><h1 className="text-3xl font-black">Access denied</h1></section>;
-if (test.origin === 'ai_generated') return <section className="mx-auto max-w-3xl"><Link href={`/tests/${id}`} className="text-sm font-bold text-indigo-600">← Back to test</Link><div className="mt-6 rounded-2xl border border-indigo-200 bg-white p-7"><h1 className="text-3xl font-black">AI-generated test</h1><p className="mt-3 text-slate-600">This published test uses private answer keys and may contain short-answer rubrics. Its approved content is immutable; soft-delete it from Manage tests or create a new AI draft to replace it.</p><Link href="/manage/tests/generate" className="mt-6 inline-block rounded-xl bg-indigo-600 px-5 py-3 font-bold text-white">Open AI generator</Link></div></section>;
+if (!shouldUseStandardTestEditor(test)) return <section className="mx-auto max-w-3xl"><Link href={`/tests/${id}`} className="text-sm font-bold text-indigo-600">← Back to test</Link><div className="mt-6 rounded-2xl border border-indigo-200 bg-white p-7"><h1 className="text-3xl font-black">AI-generated draft</h1><p className="mt-3 text-slate-600">Finish reviewing and publish this draft before editing it as a standard test.</p><Link href="/manage/tests/generate" className="mt-6 inline-block rounded-xl bg-indigo-600 px-5 py-3 font-bold text-white">Open AI generator</Link></div></section>;
 return <section className="mx-auto max-w-3xl"><Link href={`/tests/${id}`} className="text-sm font-bold text-indigo-600">← Back to test</Link><div className="mt-5 flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:justify-between"><h1 className="text-4xl font-black">Edit mock test</h1><button disabled={deleting} onClick={softDelete} className="rounded-lg border border-rose-200 px-3 py-2 text-sm font-bold text-rose-700">Soft delete</button></div>{message && <p className="mt-4 text-rose-700">{message}</p>}<TestEditor testId={id} initialTest={test} /></section> }
 
 type AssignmentWindow = { id: string; assignmentBatchId: string; assignmentName?: string; linkedTaskId?: string; maxAttempts?: number; attemptsUsed?: number; startAt?: { toDate: () => Date }; endAt?: { toDate: () => Date }; deadline?: { toDate: () => Date } }

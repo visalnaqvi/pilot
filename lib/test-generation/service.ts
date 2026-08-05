@@ -26,6 +26,7 @@ import {
   GeneratedMcqSchema,
   GenerationConfigSchema,
   repairGeneratedMcqContent,
+  shuffleMcqOptions,
   isImageSource,
 } from '@/lib/test-generation/schema'
 
@@ -198,6 +199,7 @@ export async function generateFromSources(id: string, user: ServerUser, config: 
         `Return exactly ${parsedConfig.mcqCount} questions and make every question an MCQ.`,
         `Assign exactly ${parsedConfig.mcqMarks} marks to every question.`,
         'Each MCQ must have four distinct plausible options and exactly one correct answer.',
+        'Distribute correct answers across option positions 0, 1, 2, and 3; do not place most correct answers in the same position or use a predictable pattern.',
         'Every question must cite one or more uploaded sources using the supplied source ID and exact filename.',
         'Use stable question IDs q-001, q-002, and so on.',
       ].join(' '),
@@ -426,10 +428,12 @@ export async function publishGenerationJob(id: string, user: ServerUser, input: 
       eq(categories.normalizedName, normalizedName),
     )).limit(1))[0]
     if (!category) [category] = await tx.insert(categories).values({ organizationId: job.organizationId, examId: body.examId, name: body.categoryName, normalizedName, createdBy: user.uid }).returning()
-    const contents = accepted.map(item => repairGeneratedMcqContent(item.content, {
-      ...repairDefaults,
-      id: item.candidateKey,
-    }))
+    const contents = accepted.map(item => shuffleMcqOptions(
+      repairGeneratedMcqContent(item.content, {
+        ...repairDefaults,
+        id: item.candidateKey,
+      }),
+    ))
     for (const [index, item] of accepted.entries()) {
       await tx.update(testGenerationQuestions).set({
         content: contents[index],

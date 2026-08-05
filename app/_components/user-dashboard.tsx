@@ -10,6 +10,7 @@ import { paginate, Pagination } from './pagination'
 import { SubmissionReviewButton } from './submission-answers-modal'
 import type { Submission } from './test-types'
 import { AttendanceOverviewCard } from './attendance-summary-card'
+import { chartDateKey, sortedChartDateKeys } from '@/lib/chart-dates'
 
 type TestInfo = {
   exam: string
@@ -38,8 +39,7 @@ const submittedAt = (item: Submission) => {
   return typeof item.submittedAt === 'string' ? new Date(item.submittedAt) : item.submittedAt.toDate()
 }
 const dateKey = (item: Submission) => {
-  const date = submittedAt(item)
-  return date ? `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}` : ''
+  return chartDateKey(submittedAt(item))
 }
 
 export function UserDashboard() {
@@ -228,7 +228,7 @@ function UserExamModal({
     })
     return values
   }, [attempts])
-  const dateLabels = [...daily.keys()].sort()
+  const dateLabels = sortedChartDateKeys(daily.keys())
   const averageByDateOption = {
     tooltip: { trigger: 'axis' },
     grid: { left: 45, right: 18, top: 28, bottom: 55 },

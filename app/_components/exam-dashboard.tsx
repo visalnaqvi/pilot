@@ -12,6 +12,7 @@ import { SubmissionReviewButton } from './submission-answers-modal'
 import { ExamResolver } from './exam-resolver'
 import type { ExamCatalogEntry, ExamSelectionStatus } from '@/lib/exam-catalog'
 import { AttendanceOverviewCard, StudentAttendancePanel } from './attendance-summary-card'
+import { chartDateKey, sortedChartDateKeys } from '@/lib/chart-dates'
 
 type Exam = ExamCatalogEntry
 type Group = { id: string;
@@ -207,8 +208,8 @@ function AttemptsByDateChart({ exams, tests, groups, submissions }: { exams: Exa
   const selectedGroupUserIds = groupId ? new Set(groups.find(group => group.id === groupId)?.members.map(member => member.userId) || []) : null
   const attempts = submissions.filter(item => (!examId || item.testExamId === examId || testExamIds.get(item.testId) === examId) && (!testId || item.testId === testId) && (!userId || item.userId === userId) && (!selectedGroupUserIds || selectedGroupUserIds.has(item.userId)))
   const daily = new Map<string, number>()
-  attempts.forEach(item => { const date = submissionDate(item); if (date) { const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; daily.set(key, (daily.get(key) || 0) + 1) } })
-  const labels = [...daily.keys()].sort()
+  attempts.forEach(item => { const key = chartDateKey(submissionDate(item)); if (key) daily.set(key, (daily.get(key) || 0) + 1) })
+  const labels = sortedChartDateKeys(daily.keys())
   const users = [...new Map(submissions.map(item => [item.userId, item.userEmail || item.userId])).entries()].sort((a, b) => a[1].localeCompare(b[1]))
   const option = { tooltip: { trigger: 'axis' }, grid: { left: 42, right: 18, top: 26, bottom: 54 }, xAxis: { type: 'category', data: labels, axisLabel: { rotate: 35 } }, yAxis: { type: 'value', minInterval: 1, name: 'Attempts' }, series: [{ name: 'Attempts', type: 'line', smooth: true, data: labels.map(label => daily.get(label) || 0), areaStyle: { color: '#05966922' }, lineStyle: { color: '#059669', width: 3 }, itemStyle: { color: '#059669' } }] }
   return <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div><h2 className="font-black">Number of attempts by date</h2><p className="mt-1 text-sm text-slate-500">Across all exams by default. Combine filters to narrow the trend.</p></div><div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><DashboardPicker label="Exam" value={examId} options={[{ id: '', label: 'All exams' }, ...exams.map(exam => ({ id: exam.id, label: exam.name }))]} onChange={setExamId} placeholder="Search exams" /><DashboardPicker label="Test" value={testId} options={[{ id: '', label: 'All tests' }, ...tests.map(test => ({ id: test.id, label: test.title, detail: test.category || undefined }))]} onChange={setTestId} placeholder="Search tests" /><DashboardPicker label="Student" value={userId} options={[{ id: '', label: 'All students' }, ...users.map(([id, email]) => ({ id, label: email }))]} onChange={setUserId} placeholder="Search students" /><DashboardPicker label="Batch" value={groupId} options={[{ id: '', label: 'All batches' }, ...groups.map(group => ({ id: group.id, label: group.name, detail: `${group.members.length} students` }))]} onChange={setGroupId} placeholder="Search batches" /></div>{labels.length ? <ReactECharts option={option} style={{ height: 300 }} notMerge lazyUpdate /> : <Empty text="No dated attempts match the selected filters." />}</section>
@@ -225,8 +226,8 @@ function InsightCard({ icon, label, title, subtitle, detail }: { icon: 'trophy' 
 
 function TrendChart({ title, filterLabel, value, onChange, options, attempts, emptyText }: { title: string; filterLabel: string; value: string; onChange: (value: string) => void; options: { id: string; label: string }[]; attempts: Submission[]; emptyText: string }) {
   const daily = new Map<string, Submission[]>()
-  attempts.forEach(item => { const date = submissionDate(item); if (date) { const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; daily.set(key, [...(daily.get(key) || []), item]) } })
-  const labels = [...daily.keys()].sort()
+  attempts.forEach(item => { const key = chartDateKey(submissionDate(item)); if (key) daily.set(key, [...(daily.get(key) || []), item]) })
+  const labels = sortedChartDateKeys(daily.keys())
   const option = { tooltip: { trigger: 'axis' }, grid: { left: 44, right: 18, top: 28, bottom: 58 }, xAxis: { type: 'category', data: labels, boundaryGap: false, axisLine: { lineStyle: { color: '#94a3b8' } }, axisTick: { show: false }, axisLabel: { rotate: 40, color: '#64748b' } }, yAxis: { type: 'value', min: 0, max: 100, splitLine: { lineStyle: { color: '#e2e8f0', type: 'dashed' } }, axisLabel: { formatter: '{value}%', color: '#64748b' } }, series: [{ name: 'Average score', type: 'line', smooth: 0.45, symbol: 'circle', symbolSize: 8, data: labels.map(label => Math.round((daily.get(label) || []).reduce((sum, item) => sum + score(item), 0) / (daily.get(label)?.length || 1))), areaStyle: { color: '#7c3aed1f' }, lineStyle: { color: '#6d4aff', width: 3 }, itemStyle: { color: '#fff', borderColor: '#6d4aff', borderWidth: 2 } }] }
   return <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-lg shadow-slate-200/50"><div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between"><div><h2 className="font-black text-slate-950">{title}</h2><p className="mt-1 text-sm text-slate-500">Average percentage for completed submissions.</p></div><div className="w-full sm:w-52"><DashboardPicker label={filterLabel} value={value} options={[{ id: '', label: `All ${filterLabel.toLowerCase()}s` }, ...options]} onChange={onChange} placeholder={`Search ${filterLabel.toLowerCase()}s`} inline /></div></div>{labels.length ? <ReactECharts option={option} style={{ height: 300 }} notMerge lazyUpdate /> : <Empty text={emptyText} />}</section>
 }
@@ -289,8 +290,8 @@ function GroupGoals({ attempts, groups }: { attempts: Submission[]; groups: Grou
   const pagedGroups = sortedGroups.slice((currentPage - 1) * pageSize, currentPage * pageSize)
   const toggleSort = (field: 'users' | 'average' | 'attempts') => { setSort((current) => current.field === field ? { field, direction: current.direction === 'asc' ? 'desc' : 'asc' } : { field, direction: 'desc' }); setPage(1) }
   const daily = new Map<string, Submission[]>()
-  combinedAttempts.forEach(attempt => { const date = submissionDate(attempt); if (date) { const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; daily.set(key, [...(daily.get(key) || []), attempt]) } })
-  const labels = [...daily.keys()].sort()
+  combinedAttempts.forEach(attempt => { const key = chartDateKey(submissionDate(attempt)); if (key) daily.set(key, [...(daily.get(key) || []), attempt]) })
+  const labels = sortedChartDateKeys(daily.keys())
   const lineOption = { tooltip: { trigger: 'axis' }, grid: { left: 42, right: 18, top: 28, bottom: 48 }, xAxis: { type: 'category', data: labels, axisLabel: { rotate: 35 } }, yAxis: { type: 'value', min: 0, max: 100, axisLabel: { formatter: '{value}%' } }, series: [{ name: 'Average score', type: 'line', smooth: true, data: labels.map(label => Math.round((daily.get(label) || []).reduce((sum, attempt) => sum + score(attempt), 0) / (daily.get(label)?.length || 1))), areaStyle: { color: '#4f46e522' }, lineStyle: { color: '#4f46e5', width: 3 }, itemStyle: { color: '#4f46e5' } }] }
   const attemptsByDateOption = { tooltip: { trigger: 'axis' }, grid: { left: 42, right: 18, top: 28, bottom: 48 }, xAxis: { type: 'category', data: labels, axisLabel: { rotate: 35 } }, yAxis: { type: 'value', minInterval: 1, name: 'Attempts' }, series: [{ name: 'Attempts', type: 'line', smooth: true, data: labels.map(label => (daily.get(label) || []).length), areaStyle: { color: '#05966922' }, lineStyle: { color: '#059669', width: 3 }, itemStyle: { color: '#059669' } }] }
   const barOption = { tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } }, grid: { left: 42, right: 18, top: 28, bottom: 70 }, xAxis: { type: 'category', data: byGroup.map(item => item.group.name), axisLabel: { rotate: 35, interval: 0 } }, yAxis: { type: 'value', min: 0, max: 100, axisLabel: { formatter: '{value}%' } }, series: [{ name: 'Average score', type: 'bar', data: byGroup.map(item => Math.round(item.average)), itemStyle: { color: '#059669', borderRadius: [5, 5, 0, 0] } }] }
@@ -316,8 +317,8 @@ function ExamUserList({ attempts, tests, groups, assignments, dashboardType = 'e
   const activeUser = users.find((user) => user.id === selectedUserId)
   const trendAttempts = (activeUser ? activeUser.attempts : attempts).filter((attempt) => !selectedTestId || attempt.testId === selectedTestId)
   const daily = new Map<string, Submission[]>()
-  trendAttempts.forEach((attempt) => { const date = submissionDate(attempt); if (date) { const key = date.toLocaleDateString(); daily.set(key, [...(daily.get(key) || []), attempt]) } })
-  const labels = [...daily.keys()]
+  trendAttempts.forEach((attempt) => { const key = chartDateKey(submissionDate(attempt)); if (key) daily.set(key, [...(daily.get(key) || []), attempt]) })
+  const labels = sortedChartDateKeys(daily.keys())
   const chartOption = { tooltip: { trigger: 'axis' }, grid: { left: 38, right: 16, top: 28, bottom: 48 }, xAxis: { type: 'category', data: labels, axisLabel: { rotate: 35 } }, yAxis: { type: 'value', min: 0, max: 100 }, series: [{ name: 'Average score', type: 'line', smooth: true, data: labels.map((label) => { const values = daily.get(label) || []; return Math.round(values.reduce((sum, item) => sum + score(item), 0) / values.length) }), areaStyle: { color: '#4f46e522' }, lineStyle: { color: '#4f46e5', width: 3 }, itemStyle: { color: '#4f46e5' } }] }
   const participation = assignedUsers.size ? Math.round(rankedUsers.length / assignedUsers.size * 100) : 0
   const rows = users.filter((user) => (!selectedUserId || user.id === selectedUserId) && (!selectedTestId || user.attempts.some((attempt) => attempt.testId === selectedTestId)) && (!selectedGroupName || user.groups.includes(selectedGroupName))).map((user) => {
@@ -400,10 +401,9 @@ const attempts = selectedTestId ? examAttempts.filter(item => item.testId === se
 const stats = { ...examStats, average: attempts.length ? attempts.reduce((sum, item) => sum + score(item), 0) / attempts.length : 0, students: new Set(attempts.map(item => item.userId)).size };
 const selectedTest = tests.find(test => test.id === selectedTestId);
 const daily = new Map<string, Submission[]>();
-attempts.forEach(item => { const date = submissionDate(item);
-if (date) { const key = date.toLocaleDateString();
-daily.set(key, [...(daily.get(key) || []), item]) } });
-const labels = [...daily.keys()];
+attempts.forEach(item => { const key = chartDateKey(submissionDate(item));
+if (key) daily.set(key, [...(daily.get(key) || []), item]) });
+const labels = sortedChartDateKeys(daily.keys());
 const [savedSelectedDate, setSelectedDate] = useState(labels[labels.length - 1] || '');
 const activeSelectedDate = labels.includes(savedSelectedDate) ? savedSelectedDate : labels[labels.length - 1] || '';
 const selectedDate = activeSelectedDate;
@@ -530,8 +530,8 @@ function ExamGoalProgress({ goals, attempts, tests }: { goals: { id: string; nam
     const values = goalAttempts.map(score)
     const average = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0
     const daily = new Map<string, number>()
-    goalAttempts.forEach(item => { const date = submissionDate(item); if (date) { const key = date.toLocaleDateString(); daily.set(key, (daily.get(key) || 0) + 1) } })
-    const labels = [...daily.keys()]
+    goalAttempts.forEach(item => { const key = chartDateKey(submissionDate(item)); if (key) daily.set(key, (daily.get(key) || 0) + 1) })
+    const labels = sortedChartDateKeys(daily.keys())
     const option = { tooltip: { trigger: 'axis' }, grid: { left: 42, right: 18, top: 28, bottom: 48 }, xAxis: { type: 'category', data: labels, axisLabel: { rotate: 35 } }, yAxis: { type: 'value', minInterval: 1, name: 'Tests' }, series: [{ name: 'Tests taken', type: 'line', smooth: true, data: labels.map(label => daily.get(label) || 0), areaStyle: { color: '#05966922' }, lineStyle: { color: '#059669', width: 3 }, itemStyle: { color: '#059669' } }] }
     return <article key={goal.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-600">Exam goal</p><h4 className="mt-1 text-xl font-black text-slate-950">{goal.examName || 'Unassigned exam'}</h4><p className="mt-1 text-sm text-slate-500">Assigned through {goal.name}</p></div><p className="text-sm font-semibold text-slate-500">{new Set(goalAttempts.map(item => item.testId)).size} unique test{new Set(goalAttempts.map(item => item.testId)).size === 1 ? '' : 's'}</p></div><div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4"><ModalStat label="Attempts" value={goalAttempts.length} /><ModalStat label="Average score" value={values.length ? `${Math.round(average)}%` : '—'} /><ModalStat label="Lowest score" value={values.length ? `${Math.round(Math.min(...values))}%` : '—'} /><ModalStat label="Highest score" value={values.length ? `${Math.round(Math.max(...values))}%` : '—'} /></div><div className="mt-6">{labels.length ? <Chart title="Tests taken by date" option={option} labels={[]} onDateSelect={() => undefined} /> : <Empty text="A dated submission for this exam is needed to show progress by date." />}</div></article>
   })}<Pagination page={visibleGoals.page} pageSize={5} totalItems={goals.length} onPageChange={setPage} itemLabel="exam goals" className="rounded-xl border border-slate-200 bg-white" /></section>

@@ -1,6 +1,7 @@
 'use client'
 
 import { ChangeEvent, useCallback, useEffect, useState } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import {
   ACCEPTED_SOURCE_EXTENSIONS,
@@ -495,7 +496,7 @@ export function AiTestGenerator() {
   return <section className="mx-auto max-w-6xl">
     <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
       <div><p className="text-sm font-black uppercase tracking-[.2em] text-indigo-600">AI test generator</p><h1 className="mt-2 text-4xl font-black">Turn study material into a mock test</h1><p className="mt-3 max-w-3xl text-slate-600">Upload notes or a question paper, choose the topics and test format, then review every answer before publishing.</p></div>
-      {job && <button type="button" disabled={Boolean(busy)} onClick={() => void discard()} className="rounded-xl border border-rose-200 px-4 py-3 text-sm font-black text-rose-700 disabled:opacity-50">Discard draft</button>}
+      {job && job.status !== 'published' && <button type="button" disabled={Boolean(busy)} onClick={() => void discard()} className="rounded-xl border border-rose-200 px-4 py-3 text-sm font-black text-rose-700 disabled:opacity-50">Discard draft</button>}
     </div>
     {message && <p className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800">{message}</p>}
 
@@ -513,7 +514,9 @@ export function AiTestGenerator() {
       <DraftList jobs={jobs} open={(id) => void loadJob(id)} />
     </div>}
 
-    {job && <div className="mt-8 space-y-7">
+    {job?.status === 'published' && <div className="mt-8 rounded-3xl border border-emerald-200 bg-white p-8 shadow-sm"><p className="text-sm font-black uppercase tracking-[.2em] text-emerald-700">Published test</p><h2 className="mt-2 text-3xl font-black">This is now a standard test</h2><p className="mt-3 max-w-2xl text-slate-600">Use the regular test editor to update its details, questions, answers, marks, and ordering.</p><div className="mt-6 flex flex-wrap gap-3">{job.publishedTestId && <Link href={`/tests/${job.publishedTestId}/edit`} className="rounded-xl bg-indigo-600 px-5 py-3 font-black text-white">Edit published test</Link>}<button type="button" onClick={() => setJob(null)} className="rounded-xl border border-slate-300 px-5 py-3 font-bold text-slate-700">Back to generator</button></div></div>}
+
+    {job && job.status !== 'published' && <div className="mt-8 space-y-7">
       <Progress status={displayedStatus || job.status} />
       {displayedStatus && activeStatuses.includes(displayedStatus) && <ProcessingCard status={displayedStatus} />}
       {displayedStatus === 'failed' && <div className="rounded-2xl border border-rose-200 bg-rose-50 p-6"><h2 className="text-xl font-black text-rose-900">Generation stopped</h2><p className="mt-2 text-rose-700">{job.error || 'The model did not complete this stage.'}</p><button type="button" disabled={Boolean(busy)} onClick={() => void retryFailedStage()} className="mt-4 rounded-xl bg-rose-700 px-5 py-3 font-bold text-white disabled:opacity-50">{busy === 'retrying' ? 'Retrying…' : 'Retry failed stage'}</button></div>}
@@ -540,7 +543,7 @@ export function AiTestGenerator() {
         <button type="button" disabled={Boolean(busy)} onClick={() => void generate()} className="mt-7 w-full rounded-xl bg-indigo-600 py-4 font-black text-white disabled:opacity-50">{busy === 'generating' ? 'Starting generation…' : 'Generate and verify questions'}</button>
       </div>}
 
-      {(job.status === 'review' || job.status === 'published') && <>
+      {job.status === 'review' && <>
         <div className="rounded-3xl border border-slate-200 bg-white p-7 shadow-sm">
           <StageNumber number="3" title="Review generated questions" />
           <div className="mt-4 flex flex-wrap items-center gap-3 text-sm"><Badge tone="green">{approvedCount} MCQs approved</Badge><Badge tone="slate">{mcqQuestions.length - approvedCount} MCQs remaining</Badge><Badge tone="amber">{mcqQuestions.filter(item => item.answerOrigin === 'model_inferred').length} AI-inferred answers</Badge>{shortAnswerCount > 0 && <Badge tone="red">{shortAnswerCount} short answers excluded</Badge>}<button type="button" disabled={!approvedCount} onClick={() => setPreviewing(current => !current)} className="ml-auto rounded-lg border border-indigo-200 px-3 py-2 font-bold text-indigo-700 disabled:opacity-50">{previewing ? 'Close learner preview' : 'Preview learner test'}</button></div>
@@ -571,7 +574,7 @@ export function AiTestGenerator() {
             <SelectField label="Visibility" value={visibility} setValue={value => setVisibility(value as typeof visibility)} options={[['private', 'Organisation members'], ['assigned', 'Assigned students'], ['public', 'Public']]} />
           </div>
           <label className="mt-5 block text-sm font-bold">Description<textarea value={description} onChange={event => setDescription(event.target.value)} rows={4} className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-normal" /></label>
-          <button type="button" disabled={job.status === 'published' || approvedCount === 0 || !title.trim() || !examId || !categoryId || Boolean(busy)} onClick={() => void publish()} className="mt-7 w-full rounded-xl bg-emerald-600 py-4 font-black text-white disabled:opacity-50">{job.status === 'published' ? 'Published' : busy === 'publishing' ? 'Publishing…' : `Publish ${approvedCount} approved question${approvedCount === 1 ? '' : 's'}`}</button>
+          <button type="button" disabled={approvedCount === 0 || !title.trim() || !examId || !categoryId || Boolean(busy)} onClick={() => void publish()} className="mt-7 w-full rounded-xl bg-emerald-600 py-4 font-black text-white disabled:opacity-50">{busy === 'publishing' ? 'Publishing…' : `Publish ${approvedCount} approved question${approvedCount === 1 ? '' : 's'}`}</button>
         </div>
       </>}
     </div>}
@@ -579,7 +582,7 @@ export function AiTestGenerator() {
 }
 
 function DraftList({ jobs, open }: { jobs: JobListItem[]; open: (id: string) => void }) {
-  return <aside className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="text-lg font-black">Recent drafts</h2><div className="mt-4 space-y-2">{jobs.length ? jobs.map(job => <button key={job.id} type="button" onClick={() => open(job.id)} className="w-full rounded-xl border border-slate-200 p-3 text-left hover:border-indigo-300 hover:bg-indigo-50"><span className="block truncate font-bold">{job.titleSuggestion || job.subject || 'Untitled generation'}</span><span className="mt-1 block text-xs font-semibold uppercase tracking-wide text-indigo-600">{job.status.replaceAll('_', ' ')}</span></button>) : <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-500">No AI-generated drafts yet.</p>}</div></aside>
+  return <aside className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="text-lg font-black">Recent drafts</h2><div className="mt-4 space-y-2">{jobs.length ? jobs.map(job => job.status === 'published' && job.publishedTestId ? <Link key={job.id} href={`/tests/${job.publishedTestId}/edit`} className="block w-full rounded-xl border border-slate-200 p-3 text-left hover:border-indigo-300 hover:bg-indigo-50"><span className="block truncate font-bold">{job.titleSuggestion || job.subject || 'Untitled generation'}</span><span className="mt-1 block text-xs font-semibold uppercase tracking-wide text-emerald-700">Edit published test</span></Link> : <button key={job.id} type="button" onClick={() => open(job.id)} className="w-full rounded-xl border border-slate-200 p-3 text-left hover:border-indigo-300 hover:bg-indigo-50"><span className="block truncate font-bold">{job.titleSuggestion || job.subject || 'Untitled generation'}</span><span className="mt-1 block text-xs font-semibold uppercase tracking-wide text-indigo-600">{job.status.replaceAll('_', ' ')}</span></button>) : <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-500">No AI-generated drafts yet.</p>}</div></aside>
 }
 
 function StageNumber({ number, title }: { number: string; title: string }) {
