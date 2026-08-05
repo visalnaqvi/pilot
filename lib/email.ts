@@ -1,4 +1,5 @@
 import 'server-only'
+import { getBrandConfig } from './branding'
 
 export type EmailAddress = string
 export type EmailContent = {
@@ -16,7 +17,7 @@ export function isEmailConfigured() {
 export async function sendEmail({ to, subject, text, html, metadata }: EmailContent) {
   const apiKey = process.env.SENDGRID_API_KEY
   const fromAddress = process.env.EMAIL_FROM_ADDRESS
-  const fromName = process.env.EMAIL_FROM_NAME || 'Mock Test App'
+  const fromName = process.env.EMAIL_FROM_NAME || getBrandConfig().name
 
   if (!apiKey) {
     throw new Error('SendGrid is not configured. Set SENDGRID_API_KEY in your environment.')

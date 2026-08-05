@@ -13,6 +13,7 @@ import { AssignmentModal, type AssignmentBatch } from './assignments-dashboard'
 import type { Submission } from './test-types'
 import { useTeacherOrganisations } from './use-teacher-organisations'
 import { WorkDataLoading } from './work-data-loading'
+import { useBrand } from './brand-provider'
 
 type UserAssignment = { id: string; assignmentBatchId?: string; testId: string; testTitle: string; assignmentName?: string; attemptsUsed?: number; maxAttempts?: number; startAt?: { toDate: () => Date }; deadline: { toDate: () => Date }; createdAt?: { toDate: () => Date } }
 type DateValue = { toDate: () => Date }
@@ -51,6 +52,7 @@ function stateOf(assignment: { startAt?: { toDate: () => Date }; deadline: { toD
 }
 
 export function AssignmentCalendarDashboard() {
+  const brand = useBrand()
   const { user, profile } = useAuth()
   const role = profile?.role
   const { organisations: teacherOrganisations, loading: teacherOrganisationsLoading } = useTeacherOrganisations(role === 'user' ? user : null)
@@ -169,7 +171,7 @@ export function AssignmentCalendarDashboard() {
   const assignmentSource = manager ? assignments : userAssignments
   const assignmentEvents = assignmentSource.map(assignment => {
     const state = stateOf(assignment, now)
-    const color = state === 'live' ? '#059669' : state === 'upcoming' ? '#4f46e5' : '#64748b'
+    const color = state === 'live' ? '#059669' : state === 'upcoming' ? brand.primaryColor : '#64748b'
     return { id: `assignment:${assignment.id}`, title: manager ? (assignment as AssignmentBatch).name : (assignment as UserAssignment).assignmentName || assignment.testTitle, start: assignment.startAt?.toDate() || assignment.createdAt?.toDate(), end: assignment.deadline.toDate(), backgroundColor: color, borderColor: color, extendedProps: { kind: 'assignment', originalId: assignment.id, detail: manager ? (assignment as AssignmentBatch).audienceName : assignment.testTitle } }
   })
   const taskEvents = tasks.flatMap(task => {
@@ -177,7 +179,7 @@ export function AssignmentCalendarDashboard() {
     const startTime = task.startAt?.toDate() || task.createdAt?.toDate() || task.endAt.toDate()
     const deadline = task.endAt.toDate()
     const state = task.isClosed ? 'ended' : now < startTime.getTime() ? 'upcoming' : now <= deadline.getTime() ? 'live' : 'ended'
-    const color = state === 'live' ? '#059669' : state === 'upcoming' ? '#4f46e5' : '#64748b'
+    const color = state === 'live' ? '#059669' : state === 'upcoming' ? brand.primaryColor : '#64748b'
     const detail = learner
       ? task.organisationName || task.createdByName || 'Institute'
       : task.audienceNames?.join(', ') || `${task.assignedUsers.length} assignee${task.assignedUsers.length === 1 ? '' : 's'}`
@@ -194,8 +196,8 @@ export function AssignmentCalendarDashboard() {
       endTime: entry.endTime,
       startRecur: timetable.effectiveFrom,
       endRecur: addDays(timetable.effectiveTo, 1),
-      backgroundColor: '#4f46e5',
-      borderColor: '#4338ca',
+      backgroundColor: brand.primaryColor,
+      borderColor: brand.primaryColor,
       extendedProps: {
         kind: 'timetable',
         originalId: timetable.id,

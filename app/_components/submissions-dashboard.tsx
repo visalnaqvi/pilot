@@ -142,7 +142,7 @@ function ScoreDonut({ score, total }: { score: number; total: number }) {
 
   return <div className="grid justify-items-center gap-1" aria-label={`Score: ${score} out of ${total}, ${percentage}%`}>
     <div className="relative grid h-[4.5rem] w-[4.5rem] place-items-center">
-      <svg aria-hidden="true" viewBox="0 0 52 52" className="absolute inset-0 h-full w-full -rotate-90"><circle cx="26" cy="26" r={radius} fill="none" stroke="#e0e7ff" strokeWidth="5" /><circle cx="26" cy="26" r={radius} fill="none" stroke="#4f46e5" strokeWidth="5" strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={offset} /></svg>
+      <svg aria-hidden="true" viewBox="0 0 52 52" className="absolute inset-0 h-full w-full -rotate-90"><circle cx="26" cy="26" r={radius} fill="none" stroke="var(--color-indigo-100)" strokeWidth="5" /><circle cx="26" cy="26" r={radius} fill="none" stroke="var(--color-indigo-600)" strokeWidth="5" strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={offset} /></svg>
       <span className="relative text-base font-black text-indigo-700">{percentage}%</span>
     </div>
     <span className="text-sm font-bold text-slate-800">{score}/{total}</span>

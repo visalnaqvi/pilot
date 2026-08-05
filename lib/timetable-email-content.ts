@@ -1,5 +1,6 @@
 import { daysForTimetableEntry, timetableWeekdays, type TimetableEntry } from './timetable'
 import { escapeHtml } from './task-email-content'
+import { getBrandConfig } from './branding'
 
 export function buildTimetableAgendaEmail(input: {
   recipientName?: string
@@ -61,17 +62,18 @@ function emailShell(input: {
   actionLabel: string
   extraHtml?: string
 }) {
+  const brand = getBrandConfig()
   return `<!doctype html>
 <html><body style="margin:0;background:#f8fafc;font-family:Arial,sans-serif;color:#0f172a">
 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:32px 16px;background:#f8fafc"><tr><td align="center">
 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;border:1px solid #e2e8f0;border-radius:16px;background:#fff"><tr><td style="padding:32px">
-<p style="margin:0 0 8px;color:#4f46e5;font-size:12px;font-weight:700;letter-spacing:.08em">MOCKPILOT</p>
+<p style="margin:0 0 8px;color:${brand.primaryColor};font-size:12px;font-weight:700;letter-spacing:.08em">${escapeHtml(brand.shortName)}</p>
 <h1 style="margin:0 0 20px;font-size:24px;line-height:1.3">${escapeHtml(input.heading)}</h1>
 <p style="margin:0 0 14px;line-height:1.6">Hi ${escapeHtml(input.greeting)},</p>
 <p style="margin:0 0 14px;line-height:1.6">${escapeHtml(input.message)}</p>
 ${input.extraHtml || ''}
 ${input.details.map(detail => `<p style="margin:0 0 8px;line-height:1.6;color:#475569">${escapeHtml(detail)}</p>`).join('')}
-<a href="${escapeHtml(input.actionUrl)}" style="display:inline-block;margin-top:16px;border-radius:10px;background:#4f46e5;padding:12px 18px;color:#fff;text-decoration:none;font-weight:700">${escapeHtml(input.actionLabel)}</a>
+<a href="${escapeHtml(input.actionUrl)}" style="display:inline-block;margin-top:16px;border-radius:10px;background:${brand.primaryColor};padding:12px 18px;color:#fff;text-decoration:none;font-weight:700">${escapeHtml(input.actionLabel)}</a>
 </td></tr></table></td></tr></table></body></html>`
 }
 

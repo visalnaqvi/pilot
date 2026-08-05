@@ -8,8 +8,11 @@ import { auth } from '@/lib/firebase'
 import { useAuth } from './auth-context'
 import { NotificationPanel } from './notification-panel'
 import { PendingJoinRequestsBanner } from './pending-join-requests-banner'
+import { BrandLogo } from './brand-logo'
+import { useBrand } from './brand-provider'
 
 export function AppShell({ children }: { children: React.ReactNode }) {
+  const brand = useBrand()
   const { user, profile, actualProfile, ready, isImpersonating, stopImpersonating } = useAuth()
   const router = useRouter()
   const pathname = usePathname()
@@ -34,7 +37,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [mobileMenuOpen])
 
   if (!ready || !user) {
-    return <main className="grid min-h-screen place-items-center text-slate-500">Loading MockPilot…</main>
+    return <main className="grid min-h-screen place-items-center text-slate-500">Loading {brand.name}…</main>
   }
 
   const role = profile?.role ?? 'user'
@@ -75,7 +78,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <header className="border-b border-slate-200 bg-white">
           <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-3 py-3 sm:px-5 sm:py-4">
             <div className="flex items-center gap-3">
-              <Link href="/dashboard" className="text-xl font-black tracking-tight text-indigo-600">MOCKPILOT</Link>
+              <Link href="/dashboard" aria-label={`${brand.name} dashboard`}><BrandLogo /></Link>
               <span className="hidden rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold capitalize text-slate-600 sm:inline">
                 {roleLabel}
               </span>

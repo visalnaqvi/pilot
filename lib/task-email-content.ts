@@ -1,4 +1,5 @@
 import type { TaskEmailEventType } from './task-email-plan'
+import { getBrandConfig } from './branding'
 
 export type TaskEmailTemplateInput = {
   eventType: TaskEmailEventType
@@ -37,6 +38,7 @@ function formatDate(value: Date | null | undefined, timeZone: string) {
 }
 
 export function buildTaskEmail(input: TaskEmailTemplateInput) {
+  const brand = getBrandConfig()
   const name = input.recipientName?.trim() || 'there'
   const subjectTitle = input.taskTitle.replace(/[\r\n]+/g, ' ').trim()
   const start = formatDate(input.startAt, input.timeZone)
@@ -91,13 +93,13 @@ export function buildTaskEmail(input: TaskEmailTemplateInput) {
       <tr><td align="center">
         <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;border:1px solid #e2e8f0;border-radius:16px;background:#ffffff">
           <tr><td style="padding:32px">
-            <p style="margin:0 0 8px;color:#4f46e5;font-size:12px;font-weight:700;letter-spacing:.08em">MOCKPILOT</p>
+            <p style="margin:0 0 8px;color:${brand.primaryColor};font-size:12px;font-weight:700;letter-spacing:.08em">${escapeHtml(brand.shortName)}</p>
             <h1 style="margin:0 0 20px;font-size:24px;line-height:1.3">${escapeHtml(selected.heading)}</h1>
             <p style="margin:0 0 14px;line-height:1.6">Hi ${escapeHtml(name)},</p>
             <p style="margin:0 0 14px;line-height:1.6">${escapeHtml(selected.message)}</p>
             ${description ? `<p style="margin:0 0 14px;line-height:1.6;color:#475569">${escapeHtml(description)}</p>` : ''}
             <p style="margin:0 0 24px;line-height:1.6;color:#475569">Institute: ${escapeHtml(input.organisationName)}</p>
-            <a href="${escapeHtml(input.actionUrl)}" style="display:inline-block;border-radius:10px;background:#4f46e5;padding:12px 18px;color:#ffffff;text-decoration:none;font-weight:700">Open task</a>
+            <a href="${escapeHtml(input.actionUrl)}" style="display:inline-block;border-radius:10px;background:${brand.primaryColor};padding:12px 18px;color:#ffffff;text-decoration:none;font-weight:700">Open task</a>
           </td></tr>
         </table>
       </td></tr>

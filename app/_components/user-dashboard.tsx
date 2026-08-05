@@ -11,6 +11,7 @@ import { SubmissionReviewButton } from './submission-answers-modal'
 import type { Submission } from './test-types'
 import { AttendanceOverviewCard } from './attendance-summary-card'
 import { chartDateKey, sortedChartDateKeys } from '@/lib/chart-dates'
+import { useBrand } from './brand-provider'
 
 type TestInfo = {
   exam: string
@@ -183,6 +184,7 @@ function UserExamModal({
   testInfo: Record<string, TestInfo>
   close: () => void
 }) {
+  const brand = useBrand()
   const [tab, setTab] = useState<'scores' | 'attempts'>('scores')
   const [organisationId, setOrganisationId] = useState('')
   const [examName, setExamName] = useState(initialExam.name)
@@ -245,9 +247,9 @@ function UserExamModal({
         const dateAttempts = daily.get(label) || []
         return Math.round(dateAttempts.reduce((sum, item) => sum + scorePercent(item), 0) / (dateAttempts.length || 1))
       }),
-      areaStyle: { color: '#7c3aed20' },
-      lineStyle: { color: '#6d4aff', width: 3 },
-      itemStyle: { color: '#fff', borderColor: '#6d4aff', borderWidth: 2 },
+      areaStyle: { color: `${brand.accentColor}20` },
+      lineStyle: { color: brand.accentColor, width: 3 },
+      itemStyle: { color: '#fff', borderColor: brand.accentColor, borderWidth: 2 },
     }],
   }
   const attemptsByDateOption = {

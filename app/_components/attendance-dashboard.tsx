@@ -10,6 +10,7 @@ import type {
 } from '@/lib/attendance'
 import { attendanceSeries, attendanceSummary } from '@/lib/attendance'
 import { WorkDataLoading } from './work-data-loading'
+import { useBrand } from './brand-provider'
 
 type AttendanceSeriesItem = { date: string; present: number; absent: number; percentage: number | null }
 type OrganisationOption = { organisationId: string; organisationName: string; memberRole: 'student' | 'teacher' }
@@ -58,6 +59,7 @@ export function AttendanceDashboard({
 }: {
   classesOnly?: boolean
 }) {
+  const brand = useBrand()
   const { user, profile } = useAuth()
   const [mode, setMode] = useState<'teaching' | 'student'>('teaching')
   const [from, setFrom] = useState(classesOnly ? daysAgo(30) : daysAgo(29))
@@ -128,9 +130,9 @@ export function AttendanceDashboard({
     series: [
       { name: 'Present', type: 'bar', stack: 'count', data: view?.series.map(item => item.present) || [], itemStyle: { color: '#10b981' } },
       { name: 'Absent', type: 'bar', stack: 'count', data: view?.series.map(item => item.absent) || [], itemStyle: { color: '#fb7185' } },
-      { name: 'Attendance %', type: 'line', yAxisIndex: 1, smooth: true, data: view?.series.map(item => item.percentage == null ? null : Math.round(item.percentage)) || [], itemStyle: { color: '#4f46e5' }, lineStyle: { width: 3 } },
+      { name: 'Attendance %', type: 'line', yAxisIndex: 1, smooth: true, data: view?.series.map(item => item.percentage == null ? null : Math.round(item.percentage)) || [], itemStyle: { color: brand.primaryColor }, lineStyle: { width: 3 } },
     ],
-  }), [view?.series])
+  }), [brand.primaryColor, view?.series])
 
   const today = localDateInput()
   const classItems = useMemo(() => {

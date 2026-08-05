@@ -16,6 +16,27 @@ BOOTSTRAP_ADMIN_EMAIL=admin@example.com
 
 Keep the Firebase Admin variables for ID-token verification and signed Storage operations. Never expose database or Admin credentials through `NEXT_PUBLIC_*`.
 
+## Per-client branding
+
+Branding is configured in `config/branding.ts`, which is committed with the branch. Checking out a client branch therefore switches its logo, identity, and palette without changing local environment variables. The primary and accent colors automatically produce the full shade scales used by buttons, links, tabs, focus states, calendars, charts, and badges.
+
+```ts
+const branding = {
+  name: 'Example Academy',
+  shortName: 'EXAMPLE',
+  logoUrl: '/example-academy/logo.svg',
+  logoAlt: 'Example Academy',
+  primaryColor: '#0f766e',
+  accentColor: '#ea580c',
+  tagline: 'Learn with confidence.',
+  description: 'Practice tests from Example Academy.',
+}
+```
+
+For that example, store the asset at `public/example-academy/logo.svg`. Next.js serves files inside `public` from the site root, so the canonical config URL is `/example-academy/logo.svg`. The loader also normalizes `public/example-academy/logo.svg` and `/public/example-academy/logo.svg` to the correct URL. Absolute HTTP(S) URLs are supported as well.
+
+Use 3- or 6-digit hex values for the colors. If `logoUrl` is empty, the configured short name is shown as a text wordmark. `EMAIL_FROM_NAME` remains an optional environment override and otherwise defaults to the configured brand name; notification templates use the configured name and primary color.
+
 ## Database
 
 ```bash

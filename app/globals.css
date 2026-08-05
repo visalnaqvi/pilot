@@ -78,7 +78,7 @@ button, input, textarea { font: inherit; }
 }
 
 .assignment-input::placeholder { color: #94a3b8; }
-.assignment-input:focus { border-color: #4f46e5; box-shadow: 0 0 0 3px rgb(79 70 229 / 12%); }
+.assignment-input:focus { border-color: var(--color-indigo-600); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-indigo-600) 12%, transparent); }
 
 .group-input {
   width: 100%;
@@ -92,7 +92,7 @@ button, input, textarea { font: inherit; }
 }
 
 .group-input::placeholder { color: #94a3b8; }
-.group-input:focus { border-color: #4f46e5; box-shadow: 0 0 0 3px rgb(79 70 229 / 12%); }
+.group-input:focus { border-color: var(--color-indigo-600); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-indigo-600) 12%, transparent); }
 
 /* Remove the decorative corner layer from the assignment form. */
 form > div[aria-hidden="true"].pointer-events-none { display: none !important; }
@@ -100,12 +100,12 @@ form > div[aria-hidden="true"].pointer-events-none { display: none !important; }
 .assignment-toggle {
   margin-left: auto;
   border-radius: 0.75rem;
-  background: #4f46e5;
+  background: var(--color-indigo-600);
   padding: 0.75rem 1rem;
   font-size: 0.875rem;
   font-weight: 700;
   color: #fff;
-  box-shadow: 0 8px 18px rgb(79 70 229 / 20%);
+  box-shadow: 0 8px 18px color-mix(in srgb, var(--color-indigo-600) 20%, transparent);
 }
 
 .assignment-form-header {
@@ -124,9 +124,9 @@ form > div[aria-hidden="true"].pointer-events-none { display: none !important; }
   --fc-button-text-color: #334155;
   --fc-button-hover-bg-color: #f8fafc;
   --fc-button-hover-border-color: #94a3b8;
-  --fc-button-active-bg-color: #4f46e5;
-  --fc-button-active-border-color: #4f46e5;
-  --fc-today-bg-color: #f3f1ff;
+  --fc-button-active-bg-color: var(--color-indigo-600);
+  --fc-button-active-border-color: var(--color-indigo-600);
+  --fc-today-bg-color: var(--color-indigo-50);
   --fc-now-indicator-color: #f43f5e;
   height: 100%;
   color: #334155;
@@ -176,8 +176,8 @@ form > div[aria-hidden="true"].pointer-events-none { display: none !important; }
 .assignment-calendar .fc .fc-button-group .fc-button-primary.fc-button-active:hover,
 .assignment-calendar .fc .fc-button-group .fc-button-primary.fc-button-active:focus,
 .assignment-calendar .fc .fc-button-group .fc-button-primary:active {
-  border-color: #4f46e5 !important;
-  background-color: #4f46e5 !important;
+  border-color: var(--color-indigo-600) !important;
+  background-color: var(--color-indigo-600) !important;
   color: #fff !important;
   -webkit-text-fill-color: #fff;
 }
@@ -198,9 +198,9 @@ form > div[aria-hidden="true"].pointer-events-none { display: none !important; }
 }
 
 .assignment-calendar .fc .fc-today-button {
-  border-color: #c7d2fe;
-  background: #eef2ff;
-  color: #4f46e5;
+  border-color: var(--color-indigo-200);
+  background: var(--color-indigo-50);
+  color: var(--color-indigo-600);
   opacity: 1;
 }
 
@@ -271,7 +271,7 @@ form > div[aria-hidden="true"].pointer-events-none { display: none !important; }
 
 .timetable-preview-calendar .fc {
   --fc-border-color: #e2e8f0;
-  --fc-today-bg-color: #eef2ff;
+  --fc-today-bg-color: var(--color-indigo-50);
   color: #334155;
 }
 
@@ -306,7 +306,7 @@ form > div[aria-hidden="true"].pointer-events-none { display: none !important; }
 .timetable-preview-calendar .fc .fc-event {
   border: 0;
   border-radius: 0.4rem;
-  box-shadow: 0 3px 8px rgb(49 46 129 / 18%);
+  box-shadow: 0 3px 8px color-mix(in srgb, var(--color-indigo-900) 18%, transparent);
   padding: 0.1rem;
 }
 

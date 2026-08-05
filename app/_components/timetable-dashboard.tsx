@@ -20,6 +20,7 @@ import { useAuth } from './auth-context'
 import { TimetableEditor as InteractiveTimetableEditor } from './timetable-editor'
 import { memberRole, type OrganizationMembershipRole } from '@/lib/membership'
 import { WorkDataLoading } from './work-data-loading'
+import { useBrand } from './brand-provider'
 
 type DateValue = { toDate: () => Date }
 type Member = { userId: string; userName?: string; userEmail: string; status?: string; memberRole?: OrganizationMembershipRole }
@@ -543,6 +544,7 @@ function entryOccursInCurrentWeek(entry: TimetableEntry, timetable: PublishedTim
 }
 
 function WeeklyCalendarPreview({ entries }: { entries: TimetableEntry[] }) {
+  const brand = useBrand()
   const bounds = previewTimeBounds(entries)
   const events = entries.flatMap(entry => {
     const daysOfWeek = daysForTimetableEntry(entry)
@@ -553,8 +555,8 @@ function WeeklyCalendarPreview({ entries }: { entries: TimetableEntry[] }) {
       daysOfWeek,
       startTime: entry.startTime,
       endTime: entry.endTime,
-      backgroundColor: '#4f46e5',
-      borderColor: '#4338ca',
+      backgroundColor: brand.primaryColor,
+      borderColor: brand.primaryColor,
       extendedProps: { teacher: entry.teacher || entry.location || '' },
     }]
   })
