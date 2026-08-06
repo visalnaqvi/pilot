@@ -7,8 +7,10 @@ import {
   emailDeliveries,
   emailJobs,
   organizationGroupMembers,
+  organizationGroups,
   organizations,
   taskAssignees,
+  taskGroups,
   tasks,
   taskSubmissions,
   testSubmissions,
@@ -23,13 +25,17 @@ import {
 import { appBaseUrl } from '@/lib/app-url'
 import { database } from '@/lib/db'
 import { sendEmail } from '@/lib/email'
+import {
+  organizationNotificationRecipients,
+  uniqueByRecipientEmail,
+  type EmailDeliveryRecipient,
+} from '@/lib/email-delivery-recipients'
 import { buildTaskEmail, isEmailAddress } from '@/lib/task-email-content'
 import { retryAtForAttempt, taskEmailSkipReason, type TaskEmailEventType } from '@/lib/task-email-plan'
 import { buildTimetableAgendaEmail } from '@/lib/timetable-email-content'
 import { entriesForDate, type TimetableEntry } from '@/lib/timetable'
 
 type ClaimedJob = typeof emailJobs.$inferSelect
-type Recipient = typeof users.$inferSelect
 type JobPayload = {
   recipientIds?: string[]
   eventType?: TaskEmailEventType
@@ -37,7 +43,7 @@ type JobPayload = {
   localDate?: string
 }
 type PreparedDelivery = {
-  recipient: Recipient
+  recipient: EmailDeliveryRecipient
   content: { subject: string; text: string; html?: string }
   metadata: Record<string, string>
 }
@@ -133,8 +139,8 @@ async function taskDeliveries(job: ClaimedJob): Promise<PreparedDelivery[]> {
   const actionPath = assignment
     ? `/tests/${encodeURIComponent(assignment.testId)}?assignment=${encodeURIComponent(assignment.id)}`
     : '/tasks'
-
-  return people.flatMap(recipient => {
+  const itemType = assignment ? 'assignment' : 'task'
+  const studentDeliveries = people.flatMap(recipient => {
     const skipReason = taskEmailSkipReason({
       eventType,
       manuallyClosed: task.isClosed,
@@ -146,6 +152,7 @@ async function taskDeliveries(job: ClaimedJob): Promise<PreparedDelivery[]> {
       recipient,
       content: buildTaskEmail({
         eventType,
+        itemType,
         recipientName: recipient.name,
         taskTitle: assignment?.name || task.title,
         organisationName: organization?.name || 'Institute',
@@ -162,6 +169,46 @@ async function taskDeliveries(job: ClaimedJob): Promise<PreparedDelivery[]> {
       },
     }]
   })
+
+  const notificationSkipReason = taskEmailSkipReason({
+    eventType,
+    manuallyClosed: task.isClosed,
+    submitted: false,
+  })
+  if (notificationSkipReason) return uniqueByRecipientEmail(studentDeliveries)
+  const notificationEmailRecipients = organizationNotificationRecipients(organization)
+  if (!notificationEmailRecipients.length) return uniqueByRecipientEmail(studentDeliveries)
+
+  const taskGroupNames = assignment ? [] : (await database().select({ name: organizationGroups.name })
+    .from(taskGroups)
+    .innerJoin(organizationGroups, eq(organizationGroups.id, taskGroups.groupId))
+    .where(eq(taskGroups.taskId, task.id))).map(group => group.name)
+  const audienceName = assignment?.audienceName
+    || (taskGroupNames.length ? taskGroupNames.join(', ') : `${recipientIds.length} recipient${recipientIds.length === 1 ? '' : 's'}`)
+  const notificationDeliveries = notificationEmailRecipients.map(recipient => ({
+    recipient,
+    content: buildTaskEmail({
+      eventType,
+      itemType,
+      notificationCopy: true,
+      recipientName: recipient.name,
+      taskTitle: assignment?.name || task.title,
+      organisationName: organization?.name || 'Institute',
+      audienceName,
+      description: task.description,
+      startAt: assignment?.startAt || task.startAt,
+      endAt: assignment?.deadline || task.endAt,
+      actionUrl: `${appBaseUrl()}${actionPath}`,
+      timeZone: process.env.APP_TIME_ZONE || 'Asia/Kolkata',
+    }),
+    metadata: {
+      job_id: job.id,
+      recipient_type: 'organization_notification',
+      event_type: eventType,
+    },
+  }))
+
+  return uniqueByRecipientEmail([...studentDeliveries, ...notificationDeliveries])
 }
 
 async function timetableAgendaDeliveries(job: ClaimedJob): Promise<PreparedDelivery[]> {
@@ -201,6 +248,7 @@ async function timetableAgendaDeliveries(job: ClaimedJob): Promise<PreparedDeliv
     item.currentPublishedVersionId ? [[item.currentPublishedVersionId, item] as const] : []
   )))
   const entriesByUser = new Map<string, Array<TimetableEntry & { timetableName: string }>>()
+  const organizationAgenda: Array<TimetableEntry & { timetableName: string }> = []
 
   for (const version of versionRows) {
     const timetable = timetableByVersion.get(version.id)
@@ -220,6 +268,7 @@ async function timetableAgendaDeliveries(job: ClaimedJob): Promise<PreparedDeliv
       }))
     const todayEntries = entriesForDate(entries, localDate)
     if (!todayEntries.length) continue
+    organizationAgenda.push(...todayEntries.map(entry => ({ ...entry, timetableName: timetable.name })))
     const directUserIds = directRows.filter(row => row.versionId === version.id).map(row => row.userId)
     const ownGroupIds = versionGroupRows.filter(row => row.versionId === version.id).map(row => row.groupId)
     const groupUserIds = groupMemberRows.filter(row => ownGroupIds.includes(row.groupId)).map(row => row.userId)
@@ -231,9 +280,10 @@ async function timetableAgendaDeliveries(job: ClaimedJob): Promise<PreparedDeliv
   }
 
   const recipientIds = [...entriesByUser.keys()]
-  if (!recipientIds.length) return []
-  const people = await database().select().from(users).where(inArray(users.id, recipientIds))
-  return people.map(recipient => ({
+  const people = recipientIds.length
+    ? await database().select().from(users).where(inArray(users.id, recipientIds))
+    : []
+  const studentDeliveries = people.map(recipient => ({
     recipient,
     content: buildTimetableAgendaEmail({
       recipientName: recipient.name,
@@ -248,6 +298,25 @@ async function timetableAgendaDeliveries(job: ClaimedJob): Promise<PreparedDeliv
       local_date: localDate,
     },
   }))
+  const notificationDeliveries = organizationAgenda.length
+    ? organizationNotificationRecipients(organization).map(recipient => ({
+        recipient,
+        content: buildTimetableAgendaEmail({
+          recipientName: recipient.name,
+          notificationCopy: true,
+          organisationName: organization?.name || 'Institute',
+          localDate,
+          entries: organizationAgenda,
+          actionUrl: `${appBaseUrl()}/timetables`,
+        }),
+        metadata: {
+          job_id: job.id,
+          recipient_type: 'organization_notification',
+          local_date: localDate,
+        },
+      }))
+    : []
+  return uniqueByRecipientEmail([...studentDeliveries, ...notificationDeliveries])
 }
 
 async function existingDelivery(jobId: string, recipientEmail: string) {

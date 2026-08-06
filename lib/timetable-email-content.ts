@@ -4,6 +4,7 @@ import { getBrandConfig } from './branding'
 
 export function buildTimetableAgendaEmail(input: {
   recipientName?: string
+  notificationCopy?: boolean
   organisationName: string
   localDate: string
   entries: Array<TimetableEntry & { timetableName: string }>
@@ -26,7 +27,9 @@ export function buildTimetableAgendaEmail(input: {
   const text = [
     `Hi ${name},`,
     '',
-    `Here is your class agenda for ${formattedDate}.`,
+    input.notificationCopy
+      ? `Here is the institute class agenda for ${formattedDate}.`
+      : `Here is your class agenda for ${formattedDate}.`,
     '',
     ...rows,
     '',
@@ -38,9 +41,11 @@ export function buildTimetableAgendaEmail(input: {
     .map(entry => `<tr><td style="padding:12px 0;border-bottom:1px solid #e2e8f0"><strong>${escapeHtml(entry.startTime)}–${escapeHtml(entry.endTime)} · ${escapeHtml(entry.subject)}</strong><br><span style="color:#64748b">${escapeHtml(entry.timetableName)}${entry.teacher ? ` · ${escapeHtml(entry.teacher)}` : ''}${entry.location ? ` · ${escapeHtml(entry.location)}` : ''}</span></td></tr>`)
     .join('')
   const html = emailShell({
-    heading: `Your classes for ${formattedDate}`,
+    heading: `${input.notificationCopy ? 'Classes' : 'Your classes'} for ${formattedDate}`,
     greeting: name,
-    message: `You have ${input.entries.length} class${input.entries.length === 1 ? '' : 'es'} today.`,
+    message: input.notificationCopy
+      ? `The institute has ${input.entries.length} scheduled class${input.entries.length === 1 ? '' : 'es'} today.`
+      : `You have ${input.entries.length} class${input.entries.length === 1 ? '' : 'es'} today.`,
     details: [`Institute: ${input.organisationName}`],
     extraHtml: `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin:8px 0 24px">${listHtml}</table>`,
     actionUrl: input.actionUrl,

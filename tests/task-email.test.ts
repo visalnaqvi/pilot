@@ -98,3 +98,24 @@ test('email templates escape user content and include text fallback', () => {
   assert.equal(isEmailAddress('student@example.com'), true)
   assert.equal(isEmailAddress('not-an-email'), false)
 })
+
+test('organization notification copies describe the assignment audience', () => {
+  const email = buildTaskEmail({
+    eventType: 'assigned',
+    itemType: 'assignment',
+    notificationCopy: true,
+    recipientName: 'Example Institute',
+    taskTitle: 'Weekly mock test',
+    organisationName: 'Example Institute',
+    audienceName: 'Batch A',
+    startAt: new Date('2026-01-02T10:00:00.000Z'),
+    endAt: new Date('2026-01-03T10:00:00.000Z'),
+    actionUrl: 'https://example.com/tests/test-a',
+    timeZone: 'UTC',
+    now: new Date('2026-01-01T00:00:00.000Z'),
+  })
+  assert.equal(email.subject, 'New assignment: Weekly mock test')
+  assert.match(email.text, /assigned to Batch A/)
+  assert.match(email.text, /Audience: Batch A/)
+  assert.match(email.html, /A new assignment was assigned/)
+})

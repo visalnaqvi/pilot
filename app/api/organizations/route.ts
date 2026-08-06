@@ -1,10 +1,11 @@
-import { eq, inArray } from 'drizzle-orm'
+import { eq, inArray, sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { organizationMemberships, organizations } from '@/db/schema'
 import { authenticateRequest, errorResponse } from '@/lib/admin-api'
 import { database } from '@/lib/db'
 import { adminStorage } from '@/lib/firebase-admin'
 import { acceptedMemberships, canManageOrganization } from '@/lib/services/access'
+import { clientOrganizationNameForHostname } from '@/lib/branding'
 
 const createSchema = z.object({
   name: z.string().trim().min(2).max(160),
@@ -14,6 +15,8 @@ const updateSchema = z.object({
   name: z.string().trim().min(2).max(160).optional(),
   address: z.string().trim().max(500).nullable().optional(),
   contactNumbers: z.array(z.string().trim().min(3).max(40)).max(8).optional(),
+  notificationEmails: z.array(z.string().trim().toLowerCase().email().max(320)).max(20)
+    .transform(emails => [...new Set(emails)]).optional(),
   googleMapsUrl: z.string().url().nullable().optional(),
   instagramUrl: z.string().url().nullable().optional(),
   facebookUrl: z.string().url().nullable().optional(),
@@ -21,9 +24,11 @@ const updateSchema = z.object({
   profilePhotoPath: z.string().max(500).nullable().optional(),
 })
 
-function serialize(item: typeof organizations.$inferSelect) {
+function serialize(item: typeof organizations.$inferSelect, includeNotificationEmails = false) {
+  const { notificationEmails, ...publicItem } = item
   return {
-    ...item,
+    ...publicItem,
+    ...(includeNotificationEmails ? { notificationEmails } : {}),
     createdAt: item.createdAt.toISOString(),
     updatedAt: item.updatedAt.toISOString(),
   }
@@ -50,9 +55,10 @@ export async function GET(request: Request) {
     if (requestedId) {
       const item = (await db.select().from(organizations).where(eq(organizations.id, requestedId)).limit(1))[0]
       if (!item) return Response.json({ error: 'Organization not found.' }, { status: 404 })
+      const manager = await canManageOrganization(auth.user, item.id)
       return Response.json({
         item: {
-          ...serialize(item),
+          ...serialize(item, manager),
           profilePhotoUrl: await profileImageUrl(item.profilePhotoPath),
           logoUrl: await profileImageUrl(item.logoPath),
         },
@@ -60,10 +66,17 @@ export async function GET(request: Request) {
     }
     if (auth.user.globalRole === 'admin') {
       const items = await db.select().from(organizations)
-      return Response.json({ items: items.map(serialize), nextCursor: null })
+      return Response.json({ items: items.map(item => serialize(item, true)), nextCursor: null })
     }
     if (directory) {
-      const items = await db.select().from(organizations)
+      const clientOrganizationName = clientOrganizationNameForHostname(
+        request.headers.get('host') || new URL(request.url).hostname,
+      )
+      const items = await db.select().from(organizations).where(
+        clientOrganizationName
+          ? eq(sql`lower(${organizations.name})`, clientOrganizationName.toLowerCase())
+          : undefined,
+      )
       return Response.json({
         items: await Promise.all(items.map(async item => ({
           id: item.id,
@@ -77,7 +90,7 @@ export async function GET(request: Request) {
     const memberships = await acceptedMemberships(auth.user.uid)
     const ids = memberships.map(item => item.organizationId)
     const items = ids.length ? await db.select().from(organizations).where(inArray(organizations.id, ids)) : []
-    return Response.json({ items: items.map(serialize), memberships, nextCursor: null })
+    return Response.json({ items: items.map(item => serialize(item)), memberships, nextCursor: null })
   } catch (error) {
     return errorResponse(error, 'Unable to load organizations.')
   }
@@ -122,7 +135,7 @@ export async function PATCH(request: Request) {
     const { id, ...changes } = parsed.data
     const [item] = await database().update(organizations).set({ ...changes, updatedAt: new Date() }).where(eq(organizations.id, id)).returning()
     if (!item) return Response.json({ error: 'Organization not found.' }, { status: 404 })
-    return Response.json({ item: serialize(item) })
+    return Response.json({ item: serialize(item, true) })
   } catch (error) {
     return errorResponse(error, 'Unable to update organization.')
   }

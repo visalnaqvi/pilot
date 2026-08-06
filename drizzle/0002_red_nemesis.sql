@@ -1,0 +1,1 @@
+ALTER TABLE "organizations" ADD COLUMN "notification_emails" text[] DEFAULT ARRAY[]::text[] NOT NULL;

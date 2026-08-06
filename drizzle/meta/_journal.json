@@ -15,6 +15,13 @@
       "when": 1786007112303,
       "tag": "0001_cooing_ronan",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786034347061,
+      "tag": "0002_red_nemesis",
+      "breakpoints": true
     }
   ]
 }

@@ -146,3 +146,17 @@ test('morning timetable emails aggregate agenda rows and escape user-controlled 
   assert.doesNotMatch(agenda.html, /<Reasoning>/)
   assert.match(agenda.html, /&lt;Reasoning&gt;/)
 })
+
+test('morning timetable notification copies describe the institute-wide agenda', () => {
+  const agenda = buildTimetableAgendaEmail({
+    recipientName: 'Example Institute',
+    notificationCopy: true,
+    organisationName: 'Example Institute',
+    localDate: '2026-01-05',
+    entries: [{ ...monday, timetableName: 'Batch A' }],
+    actionUrl: 'https://example.com/timetables',
+  })
+  assert.match(agenda.text, /institute class agenda/)
+  assert.match(agenda.html, /The institute has 1 scheduled class today/)
+  assert.doesNotMatch(agenda.html, /Your classes/)
+})

@@ -5,6 +5,7 @@ import Link from 'next/link'
 import Image from 'next/image'
 import { authenticatedFetch } from '@/lib/authenticated-fetch'
 import { useAuth, type UserProfile } from './auth-context'
+import { useBrand } from './brand-provider'
 import { paginate, Pagination } from './pagination'
 
 type OrganisationInvite = {
@@ -21,8 +22,13 @@ type OrganisationInvite = {
 
 export function Invitations() {
   const { user, profile } = useAuth()
+  const {
+    organizationName: deploymentOrganizationName,
+    logoUrl: deploymentLogoUrl,
+  } = useBrand()
   const [invites, setInvites] = useState<OrganisationInvite[]>([])
   const [organisations, setOrganisations] = useState<UserProfile[]>([])
+  const [directoryLoading, setDirectoryLoading] = useState(true)
   const [organisationNames, setOrganisationNames] = useState<Record<string, string>>({})
   const [term, setTerm] = useState('')
   const [message, setMessage] = useState('')
@@ -70,6 +76,8 @@ export function Invitations() {
       setOrganisationNames(Object.fromEntries((organizationData.items || []).map((item: { id: string; name: string }) => [item.id, item.name])))
     }).catch(reason => {
       if (active) setMessage(reason instanceof Error ? reason.message : 'Could not load institutes.')
+    }).finally(() => {
+      if (active) setDirectoryLoading(false)
     })
     return () => { active = false }
   }, [allowed, user])
@@ -161,13 +169,34 @@ export function Invitations() {
   const pendingInvitations = invites.filter(invite => invite.status === 'pending' && invite.initiatedBy !== 'user')
   const sentRequests = invites.filter(invite => invite.status === 'pending' && invite.initiatedBy === 'user')
   const joined = invites.filter(invite => invite.status === 'accepted')
+  const deploymentOrganisation = deploymentOrganizationName ? organisations[0] : undefined
+  const deploymentMembership = deploymentOrganisation ? inviteFrom(deploymentOrganisation.uid) : undefined
+  const deploymentRequestBusy = Boolean(deploymentOrganisation && updating === `${deploymentOrganisation.uid}_${user?.uid}`)
 
   return <section className="mx-auto max-w-3xl">
     <p className="text-sm font-bold tracking-widest text-indigo-600">MEMBERSHIP</p>
     <h1 className="mt-1 text-4xl font-black">Institute invitations</h1>
     <p className="mt-3 text-slate-600">Accept an invitation or request to join an institute.</p>
 
-    <section className="mt-7 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+    {deploymentOrganizationName ? <section className="mt-7 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+      <h2 className="text-xl font-black text-slate-950">Your institute</h2>
+      <p className="mt-1 text-sm text-slate-500">This portal is for students of {deploymentOrganizationName}.</p>
+      <div className="mt-4 overflow-hidden rounded-xl border border-slate-200">
+        {directoryLoading
+          ? <p className="p-5 text-sm text-slate-500">Loading institute...</p>
+          : deploymentOrganisation
+            ? <div className="flex flex-col justify-between gap-3 px-4 py-3 sm:flex-row sm:items-center">
+                <OrganisationIdentity organisation={deploymentOrganisation} fallbackLogoUrl={deploymentLogoUrl} />
+                <Link href={`/organisations/${encodeURIComponent(deploymentOrganisation.uid)}`} className="rounded-lg border border-slate-300 px-3 py-2 text-center text-sm font-bold text-slate-700 hover:bg-slate-50">Info</Link>
+                {deploymentMembership?.status === 'accepted'
+                  ? <StatusBadge tone="accepted">Joined</StatusBadge>
+                  : deploymentMembership?.status === 'pending'
+                    ? <StatusBadge tone="pending">{deploymentMembership.initiatedBy === 'user' ? 'Request pending' : 'Invitation waiting'}</StatusBadge>
+                    : <button type="button" disabled={deploymentRequestBusy} onClick={() => void requestToJoin(deploymentOrganisation)} className="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-bold text-white disabled:opacity-50">{deploymentRequestBusy ? 'Sending...' : deploymentMembership?.status === 'declined' ? 'Request again' : 'Request to join'}</button>}
+              </div>
+            : <p className="p-5 text-sm text-rose-600">{deploymentOrganizationName} is not available. Please contact support.</p>}
+      </div>
+    </section> : <section className="mt-7 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
       <h2 className="text-xl font-black text-slate-950">Find an institute</h2>
       <p className="mt-1 text-sm text-slate-500">Search by institute name or email and send a join request.</p>
       <label className="mt-4 block text-sm font-bold text-slate-800">
@@ -193,7 +222,7 @@ export function Invitations() {
         })}
         {!matches.length && <p className="p-5 text-sm text-slate-500">No institutes match that name or email.</p>}
       </div>}
-    </section>
+    </section>}
 
     {message && <p className="mt-5 rounded-xl bg-indigo-50 p-4 text-sm text-indigo-800">{message}</p>}
 
@@ -215,8 +244,9 @@ function InviteList({ title, empty, invites, nameOf, action }: { title: string; 
   </div>
 }
 
-function OrganisationIdentity({ organisation }: { organisation: UserProfile }) {
-  return <div className="flex min-w-0 flex-1 items-center gap-3"><span className="relative grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-xl bg-indigo-50 font-black text-indigo-600">{organisation.logoUrl ? <Image src={organisation.logoUrl} alt="" fill sizes="44px" className="object-cover" /> : (organisation.name || organisation.email).slice(0, 1).toUpperCase()}</span><div className="min-w-0"><p className="truncate font-bold text-slate-900">{organisation.name || organisation.email}</p><p className="mt-0.5 line-clamp-2 text-sm text-slate-500">{organisation.address || organisation.email}</p></div></div>
+function OrganisationIdentity({ organisation, fallbackLogoUrl }: { organisation: UserProfile; fallbackLogoUrl?: string }) {
+  const logoUrl = organisation.logoUrl || fallbackLogoUrl
+  return <div className="flex min-w-0 flex-1 items-center gap-3"><span className="relative grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-xl bg-indigo-50 font-black text-indigo-600">{logoUrl ? <Image src={logoUrl} alt="" fill sizes="44px" className="object-contain p-1" /> : (organisation.name || organisation.email).slice(0, 1).toUpperCase()}</span><div className="min-w-0"><p className="truncate font-bold text-slate-900">{organisation.name || organisation.email}</p><p className="mt-0.5 line-clamp-2 text-sm text-slate-500">{organisation.address || organisation.email}</p></div></div>
 }
 
 function StatusBadge({ tone, children }: { tone: 'accepted' | 'pending'; children: React.ReactNode }) {

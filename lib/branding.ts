@@ -7,6 +7,7 @@ import {
 export type BrandConfig = {
   name: string
   shortName: string
+  organizationName?: string
   logoUrl?: string
   logoAlt: string
   primaryColor: string
@@ -93,6 +94,7 @@ export function createBrandPalette(color: string, secondaryColor?: string) {
 
 export function resolveBrandConfig(definition: BrandingDefinition): BrandConfig {
   const name = valueOrDefault(definition.name, DEFAULT_BRAND.name)
+  const organizationName = definition.organizationName?.trim()
   const primaryColor = normalizeHexColor(definition.primaryColor, DEFAULT_BRAND.primaryColor)
   const fromAddress = definition.email?.fromAddress?.trim()
   const fromName = definition.email?.fromName?.trim()
@@ -100,6 +102,7 @@ export function resolveBrandConfig(definition: BrandingDefinition): BrandConfig 
   return {
     name,
     shortName: valueOrDefault(definition.shortName, name.toUpperCase()),
+    ...(organizationName ? { organizationName } : {}),
     logoUrl: normalizeLogoUrl(definition.logoUrl),
     logoAlt: valueOrDefault(definition.logoAlt, `${name} logo`),
     primaryColor,
@@ -115,6 +118,15 @@ export function resolveBrandConfig(definition: BrandingDefinition): BrandConfig 
       },
     } : {}),
   }
+}
+
+export function clientOrganizationNameForHostname(
+  hostname: string | undefined | null,
+  environment: BrandingEnvironment = process.env,
+) {
+  const localClientId = localBrandClientId(environment)
+  const clientId = localClientId || (isKnownClientHostname(hostname) ? clientIdForHostname(hostname) : undefined)
+  return clientId ? resolveBrandConfig(brandingByClient[clientId]).organizationName : undefined
 }
 
 export function normalizeHostname(value: string | undefined | null) {

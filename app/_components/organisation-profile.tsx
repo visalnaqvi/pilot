@@ -6,6 +6,7 @@ import Image from 'next/image'
 import { authenticatedFetch } from '@/lib/authenticated-fetch'
 import { uploadAuthorizedFile } from '@/lib/file-upload'
 import { useAuth, type UserProfile } from './auth-context'
+import { useBrand } from './brand-provider'
 
 type OrganisationInvite = {
   id: string
@@ -23,6 +24,7 @@ type ProfileForm = {
   logoUrl: string
   address: string
   contactNumbers: string
+  notificationEmails: string
   googleMapsUrl: string
   instagramUrl: string
   facebookUrl: string
@@ -39,6 +41,7 @@ const emptyForm: ProfileForm = {
   logoUrl: '',
   address: '',
   contactNumbers: '',
+  notificationEmails: '',
   googleMapsUrl: '',
   instagramUrl: '',
   facebookUrl: '',
@@ -50,6 +53,7 @@ const profileFormFrom = (organisation: OrganisationProfileData): ProfileForm => 
   logoUrl: organisation.logoUrl || '',
   address: organisation.address || '',
   contactNumbers: organisation.contactNumbers?.join('\n') || '',
+  notificationEmails: organisation.notificationEmails?.join('\n') || '',
   googleMapsUrl: organisation.googleMapsUrl || '',
   instagramUrl: organisation.instagramUrl || '',
   facebookUrl: organisation.facebookUrl || '',
@@ -67,6 +71,7 @@ const cleanUrl = (value?: string | null) => {
 
 export function OrganisationProfile({ organisationId }: { organisationId: string }) {
   const { user, profile } = useAuth()
+  const brand = useBrand()
   const [organisation, setOrganisation] = useState<OrganisationProfileData | null>(null)
   const [form, setForm] = useState<ProfileForm>(emptyForm)
   const [invite, setInvite] = useState<OrganisationInvite | null>(null)
@@ -95,6 +100,7 @@ export function OrganisationProfile({ organisationId }: { organisationId: string
         logoUrl?: string
         address?: string | null
         contactNumbers?: string[]
+        notificationEmails?: string[]
         googleMapsUrl?: string | null
         instagramUrl?: string | null
         facebookUrl?: string | null
@@ -111,6 +117,7 @@ export function OrganisationProfile({ organisationId }: { organisationId: string
         logoUrl: item.logoUrl,
         address: item.address,
         contactNumbers: item.contactNumbers,
+        notificationEmails: item.notificationEmails,
         googleMapsUrl: item.googleMapsUrl,
         instagramUrl: item.instagramUrl,
         facebookUrl: item.facebookUrl,
@@ -235,6 +242,10 @@ export function OrganisationProfile({ organisationId }: { organisationId: string
     setSaving(true)
     setMessage('')
     try {
+      const notificationEmails = [...new Set(form.notificationEmails
+        .split(/\r?\n|,|;/)
+        .map(item => item.trim().toLowerCase())
+        .filter(Boolean))]
       const response = await authenticatedFetch(user, '/api/organizations', {
         method: 'PATCH',
         body: JSON.stringify({
@@ -244,6 +255,7 @@ export function OrganisationProfile({ organisationId }: { organisationId: string
         logoPath: imagePaths.logoUrl,
         address: form.address.trim() || null,
         contactNumbers: form.contactNumbers.split(/\r?\n|,/).map(item => item.trim()).filter(Boolean).slice(0, 6),
+        notificationEmails,
         googleMapsUrl: form.googleMapsUrl.trim() || null,
         instagramUrl: form.instagramUrl.trim() || null,
         facebookUrl: form.facebookUrl.trim() || null,
@@ -256,6 +268,7 @@ export function OrganisationProfile({ organisationId }: { organisationId: string
         name,
         address: form.address.trim(),
         contactNumbers: form.contactNumbers.split(/\r?\n|,/).map(item => item.trim()).filter(Boolean).slice(0, 6),
+        notificationEmails,
         googleMapsUrl: form.googleMapsUrl.trim(),
         instagramUrl: form.instagramUrl.trim(),
         facebookUrl: form.facebookUrl.trim(),
@@ -328,6 +341,7 @@ export function OrganisationProfile({ organisationId }: { organisationId: string
   if (!organisation) return <section className="mx-auto max-w-3xl rounded-2xl border border-slate-200 bg-white p-8 text-center"><h1 className="text-2xl font-black">Institute not found</h1><p className="mt-2 text-slate-500">This profile may no longer be available.</p><Link href="/invitations" className="mt-5 inline-flex font-bold text-indigo-600">Back to institutes</Link></section>
 
   const name = organisation.name || organisation.email
+  const logoUrl = organisation.logoUrl || brand.logoUrl || ''
   const mapUrl = cleanUrl(organisation.googleMapsUrl)
   const instagramUrl = cleanUrl(organisation.instagramUrl)
   const facebookUrl = cleanUrl(organisation.facebookUrl)
@@ -342,7 +356,7 @@ export function OrganisationProfile({ organisationId }: { organisationId: string
       <div className="px-5 pb-7 sm:px-8">
         <div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
           <div className="flex min-w-0 items-end gap-4">
-            <ProfileLogo key={organisation.logoUrl || 'empty-logo'} src={organisation.logoUrl || ''} name={name} />
+            <ProfileLogo key={logoUrl || 'empty-logo'} src={logoUrl} name={name} />
             <div className="min-w-0 pb-1">
               <p className="text-xs font-black uppercase tracking-[.2em] text-indigo-600">Institute profile</p>
               <h1 className="mt-1 truncate text-3xl font-black tracking-tight text-slate-950 sm:text-4xl">{name}</h1>
@@ -435,6 +449,7 @@ function ProfileEditor({ form, saving, uploading, updateField, uploadImage, remo
       <label className="text-sm font-bold text-slate-800 sm:col-span-2">Institute name<input required maxLength={120} value={form.name} onChange={event => updateField('name', event.target.value)} className={inputClass} /></label>
       <label className="text-sm font-bold text-slate-800 sm:col-span-2">Address<textarea rows={4} maxLength={500} value={form.address} onChange={event => updateField('address', event.target.value)} placeholder="Street, city, state and postal code" className={inputClass} /></label>
       <label className="text-sm font-bold text-slate-800 sm:col-span-2">Contact numbers<textarea rows={3} value={form.contactNumbers} onChange={event => updateField('contactNumbers', event.target.value)} placeholder={'One number per line\n+91 98765 43210'} className={inputClass} /><span className="mt-1 block text-xs font-normal text-slate-500">Add up to six numbers, one per line.</span></label>
+      <label className="text-sm font-bold text-slate-800 sm:col-span-2">Notification emails<textarea rows={3} value={form.notificationEmails} onChange={event => updateField('notificationEmails', event.target.value)} placeholder={'One email per line\nnotifications@example.com'} className={inputClass} /><span className="mt-1 block text-xs font-normal leading-5 text-slate-500">Add up to 20 addresses. Each receives one copy of task, assignment, reminder, and morning timetable emails from this institute.</span></label>
       <UrlField label="Google Maps link" value={form.googleMapsUrl} update={value => updateField('googleMapsUrl', value)} />
       <UrlField label="Instagram link" value={form.instagramUrl} update={value => updateField('instagramUrl', value)} />
       <UrlField label="Facebook link" value={form.facebookUrl} update={value => updateField('facebookUrl', value)} wide />

@@ -42,6 +42,7 @@ export const organizations = pgTable('organizations', {
   profilePhotoPath: text('profile_photo_path'),
   address: text('address'),
   contactNumbers: text('contact_numbers').array().notNull().default(sql`ARRAY[]::text[]`),
+  notificationEmails: text('notification_emails').array().notNull().default(sql`ARRAY[]::text[]`),
   googleMapsUrl: text('google_maps_url'),
   instagramUrl: text('instagram_url'),
   facebookUrl: text('facebook_url'),

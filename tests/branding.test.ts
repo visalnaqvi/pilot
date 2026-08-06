@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { clientIdForHostname, createBrandPalette, getBrandConfig, getBrandCssVariables, normalizeHexColor, normalizeHostname, normalizeLogoUrl, resolveBrandConfig } from '../lib/branding'
+import { clientIdForHostname, clientOrganizationNameForHostname, createBrandPalette, getBrandConfig, getBrandCssVariables, normalizeHexColor, normalizeHostname, normalizeLogoUrl, resolveBrandConfig } from '../lib/branding'
 
 test('branding reads the MockPilot configuration for local development', () => {
   const brand = getBrandConfig('localhost:3000')
@@ -17,6 +17,8 @@ test('branding selects Aggarwal Education Center from its deployment hostname', 
   const brand = getBrandConfig('pilot.aggarwaleducationcenter.com:443')
   assert.equal(clientIdForHostname('PILOT.AGGARWALEDUCATIONCENTER.COM.'), 'aggarwal-education')
   assert.equal(brand.name, 'Aggarwal Education Center')
+  assert.equal(brand.organizationName, 'Aggarwal Education Center')
+  assert.equal(clientOrganizationNameForHostname('pilot.aggarwaleducationcenter.com'), 'Aggarwal Education Center')
   assert.equal(brand.logoUrl, '/aggarwaleducation/Aggarwal-Education-Center-Logo.png')
   assert.equal(
     brand.email?.logoUrl,
@@ -29,6 +31,7 @@ test('branding selects Aggarwal Education Center from its deployment hostname', 
 
 test('branding safely falls back to MockPilot for an unknown hostname', () => {
   assert.equal(getBrandConfig('preview.example.com').name, 'MockPilot')
+  assert.equal(clientOrganizationNameForHostname('preview.example.com'), undefined)
   assert.equal(normalizeHostname('https://PILOT.AGGARWALEDUCATIONCENTER.COM.:443/path'), 'pilot.aggarwaleducationcenter.com')
 })
 
@@ -38,6 +41,10 @@ test('local development can override hostname-based branding', () => {
     LOCAL_BRAND_CLIENT_ID: 'aggarwal-education',
   })
   assert.equal(brand.name, 'Aggarwal Education Center')
+  assert.equal(clientOrganizationNameForHostname('localhost:3000', {
+    NODE_ENV: 'development',
+    LOCAL_BRAND_CLIENT_ID: 'aggarwal-education',
+  }), 'Aggarwal Education Center')
 })
 
 test('production ignores the local branding override', () => {

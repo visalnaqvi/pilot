@@ -1,6 +1,8 @@
 export type BrandingDefinition = {
   name?: string
   shortName?: string
+  /** Institute associated with this deployment, when membership is client-scoped. */
+  organizationName?: string
   logoUrl?: string
   logoAlt?: string
   primaryColor?: string
@@ -47,6 +49,7 @@ export const brandingByClient = {
   },
   'aggarwal-education': {
     hostnames: ['pilot.aggarwaleducationcenter.com'],
+    organizationName: 'Aggarwal Education Center',
     name: 'Aggarwal Education Center',
     shortName: 'AEC',
     logoUrl: '/aggarwaleducation/Aggarwal-Education-Center-Logo.png',

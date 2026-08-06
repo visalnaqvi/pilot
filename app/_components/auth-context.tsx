@@ -20,6 +20,7 @@ export type UserProfile = {
   logoUrl?: string
   address?: string | null
   contactNumbers?: string[]
+  notificationEmails?: string[]
   googleMapsUrl?: string | null
   instagramUrl?: string | null
   facebookUrl?: string | null

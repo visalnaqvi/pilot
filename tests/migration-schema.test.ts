@@ -47,6 +47,10 @@ test('migration enforces key uniqueness and foreign-key relationships', () => {
   assert.match(migration, /FOREIGN KEY/)
 })
 
+test('organizations store notification email recipients', () => {
+  assert.match(migration, /ALTER TABLE "organizations" ADD COLUMN "notification_emails" text\[\]/)
+})
+
 test('removed exam-information tables are absent', () => {
   assert.doesNotMatch(migration, /exam_(cycles|updates|revisions|refresh|sources|evidence)/i)
 })
@@ -77,6 +81,13 @@ test('creation routes send only assigned jobs immediately and leave scheduled jo
     assert.match(route, /planTaskEmailJobs/)
     assert.match(route, /immediateEmailJobId/)
   }
+})
+
+test('organization event email worker includes de-duplicated notification recipients', () => {
+  const worker = readFileSync(join(process.cwd(), 'lib', 'email-worker.ts'), 'utf8')
+  assert.match(worker, /organizationNotificationRecipients\(organization\)/)
+  assert.match(worker, /uniqueByRecipientEmail/)
+  assert.match(worker, /notificationCopy: true/)
 })
 
 test('timetable publishing queues deduplicated 7 AM agendas instead of publication emails', () => {

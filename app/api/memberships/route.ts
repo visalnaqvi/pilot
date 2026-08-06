@@ -1,9 +1,10 @@
-import { and, eq } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { notifications, organizationMemberships, organizations, users } from '@/db/schema'
 import { authenticateRequest, errorResponse } from '@/lib/admin-api'
 import { database } from '@/lib/db'
 import { canManageOrganization } from '@/lib/services/access'
+import { clientOrganizationNameForHostname } from '@/lib/branding'
 
 const createSchema = z.object({
   organizationId: z.string().uuid(),
@@ -24,6 +25,14 @@ export async function GET(request: Request) {
     const db = database()
     const requestedOrganization = new URL(request.url).searchParams.get('organizationId')
     const managed = requestedOrganization && await canManageOrganization(auth.user, requestedOrganization)
+    const clientOrganizationName = clientOrganizationNameForHostname(
+      request.headers.get('host') || new URL(request.url).hostname,
+    )
+    const clientOrganization = clientOrganizationName
+      ? (await db.select({ id: organizations.id }).from(organizations).where(
+          eq(sql`lower(${organizations.name})`, clientOrganizationName.toLowerCase()),
+        ).limit(1))[0]
+      : undefined
     const rows = await db
       .select({
         organizationId: organizationMemberships.organizationId,
@@ -41,7 +50,14 @@ export async function GET(request: Request) {
       .innerJoin(users, eq(users.id, organizationMemberships.userId))
       .where(managed && requestedOrganization
         ? eq(organizationMemberships.organizationId, requestedOrganization)
-        : eq(organizationMemberships.userId, auth.user.uid))
+        : clientOrganizationName
+          ? clientOrganization
+            ? and(
+                eq(organizationMemberships.userId, auth.user.uid),
+                eq(organizationMemberships.organizationId, clientOrganization.id),
+              )
+            : sql`false`
+          : eq(organizationMemberships.userId, auth.user.uid))
     return Response.json({
       items: rows.map(row => ({ ...row, createdAt: row.createdAt.toISOString() })),
       nextCursor: null,
@@ -57,6 +73,14 @@ export async function POST(request: Request) {
   try {
     const parsed = createSchema.safeParse(await request.json())
     if (!parsed.success) return Response.json({ error: 'Invalid membership request.', issues: parsed.error.issues }, { status: 400 })
+    const organization = (await database().select().from(organizations).where(eq(organizations.id, parsed.data.organizationId)).limit(1))[0]
+    if (!organization) return Response.json({ error: 'Organization not found.' }, { status: 404 })
+    const clientOrganizationName = clientOrganizationNameForHostname(
+      request.headers.get('host') || new URL(request.url).hostname,
+    )
+    if (clientOrganizationName && organization.name.trim().toLowerCase() !== clientOrganizationName.toLowerCase()) {
+      return Response.json({ error: `This deployment only accepts requests for ${clientOrganizationName}.` }, { status: 403 })
+    }
     const manager = await canManageOrganization(auth.user, parsed.data.organizationId)
     let targetUserId = auth.user.uid
     const status: 'pending' | 'accepted' = 'pending'
@@ -76,7 +100,6 @@ export async function POST(request: Request) {
       target: [organizationMemberships.organizationId, organizationMemberships.userId],
       set: { role: parsed.data.role, status, initiatedBy: auth.user.uid, updatedAt: new Date() },
     }).returning()
-    const organization = (await database().select().from(organizations).where(eq(organizations.id, parsed.data.organizationId)).limit(1))[0]
     await database().insert(notifications).values({
       type: parsed.data.email ? 'organization_invitation' : 'membership_request',
       recipientUserId: parsed.data.email ? targetUserId : null,
@@ -102,6 +125,15 @@ export async function PATCH(request: Request) {
     const parsed = updateSchema.safeParse(await request.json())
     if (!parsed.success) return Response.json({ error: 'Invalid membership update.', issues: parsed.error.issues }, { status: 400 })
     const ownDecision = parsed.data.userId === auth.user.uid && Boolean(parsed.data.status)
+    const clientOrganizationName = clientOrganizationNameForHostname(
+      request.headers.get('host') || new URL(request.url).hostname,
+    )
+    if (ownDecision && clientOrganizationName) {
+      const organization = (await database().select({ name: organizations.name }).from(organizations).where(eq(organizations.id, parsed.data.organizationId)).limit(1))[0]
+      if (!organization || organization.name.trim().toLowerCase() !== clientOrganizationName.toLowerCase()) {
+        return Response.json({ error: `This deployment only allows membership in ${clientOrganizationName}.` }, { status: 403 })
+      }
+    }
     if (!ownDecision && !(await canManageOrganization(auth.user, parsed.data.organizationId))) {
       return Response.json({ error: 'You cannot update this membership.' }, { status: 403 })
     }

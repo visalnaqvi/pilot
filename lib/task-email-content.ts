@@ -3,9 +3,12 @@ import { getBrandConfig } from './branding'
 
 export type TaskEmailTemplateInput = {
   eventType: TaskEmailEventType
+  itemType?: 'task' | 'assignment'
+  notificationCopy?: boolean
   recipientName?: string
   taskTitle: string
   organisationName: string
+  audienceName?: string
   description?: string
   startAt?: Date | null
   endAt?: Date | null
@@ -40,38 +43,43 @@ function formatDate(value: Date | null | undefined, timeZone: string) {
 export function buildTaskEmail(input: TaskEmailTemplateInput) {
   const brand = getBrandConfig()
   const name = input.recipientName?.trim() || 'there'
+  const itemLabel = input.itemType === 'assignment' ? 'assignment' : 'task'
+  const itemLabelTitle = itemLabel[0].toUpperCase() + itemLabel.slice(1)
   const subjectTitle = input.taskTitle.replace(/[\r\n]+/g, ' ').trim()
   const start = formatDate(input.startAt, input.timeZone)
   const end = formatDate(input.endAt, input.timeZone)
   const activeNow = !input.startAt || input.startAt.getTime() <= (input.now || new Date()).getTime()
+  const availability = activeNow
+    ? `is available now${end ? ` and is due ${end}` : ''}`
+    : `starts ${start}${end ? ` and is due ${end}` : ''}`
 
   const copy: Record<TaskEmailEventType, { subject: string; heading: string; message: string }> = {
     assigned: {
-      subject: `New task: ${subjectTitle}`,
-      heading: 'A new task has been assigned to you',
-      message: activeNow
-        ? `${input.taskTitle} is available now${end ? ` and is due ${end}` : ''}.`
-        : `${input.taskTitle} starts ${start}${end ? ` and is due ${end}` : ''}.`,
+      subject: `New ${itemLabel}: ${subjectTitle}`,
+      heading: input.notificationCopy ? `A new ${itemLabel} was assigned` : `A new ${itemLabel} has been assigned to you`,
+      message: input.notificationCopy && input.audienceName
+        ? `${input.taskTitle} was assigned to ${input.audienceName}; it ${availability}.`
+        : `${input.taskTitle} ${availability}.`,
     },
     start: {
       subject: `${subjectTitle} is now available`,
-      heading: 'Your task has started',
+      heading: input.notificationCopy ? `${itemLabelTitle} has started` : `Your ${itemLabel} has started`,
       message: `${input.taskTitle} is available now${end ? ` and is due ${end}` : ''}.`,
     },
     'deadline-24h': {
       subject: `24 hours left: ${subjectTitle}`,
-      heading: 'Your task is due in 24 hours',
+      heading: input.notificationCopy ? `${itemLabelTitle} is due in 24 hours` : `Your ${itemLabel} is due in 24 hours`,
       message: `${input.taskTitle} is due ${end}.`,
     },
     'deadline-1h': {
       subject: `1 hour left: ${subjectTitle}`,
-      heading: 'Your task is due in 1 hour',
+      heading: input.notificationCopy ? `${itemLabelTitle} is due in 1 hour` : `Your ${itemLabel} is due in 1 hour`,
       message: `${input.taskTitle} is due ${end}.`,
     },
     ended: {
       subject: `Deadline passed: ${subjectTitle}`,
-      heading: 'Your task deadline has passed',
-      message: `${input.taskTitle} was due ${end}. Open the task to review its current status.`,
+      heading: input.notificationCopy ? `${itemLabelTitle} deadline has passed` : `Your ${itemLabel} deadline has passed`,
+      message: `${input.taskTitle} was due ${end}. Open the ${itemLabel} to review its current status.`,
     },
   }
   const selected = copy[input.eventType]
@@ -81,6 +89,7 @@ export function buildTaskEmail(input: TaskEmailTemplateInput) {
     '',
     selected.message,
     description ? `Details: ${description}` : '',
+    input.audienceName ? `Audience: ${input.audienceName}` : '',
     '',
     `Institute: ${input.organisationName}`,
     `Open task: ${input.actionUrl}`,
@@ -98,8 +107,9 @@ export function buildTaskEmail(input: TaskEmailTemplateInput) {
             <p style="margin:0 0 14px;line-height:1.6">Hi ${escapeHtml(name)},</p>
             <p style="margin:0 0 14px;line-height:1.6">${escapeHtml(selected.message)}</p>
             ${description ? `<p style="margin:0 0 14px;line-height:1.6;color:#475569">${escapeHtml(description)}</p>` : ''}
+            ${input.audienceName ? `<p style="margin:0 0 8px;line-height:1.6;color:#475569">Audience: ${escapeHtml(input.audienceName)}</p>` : ''}
             <p style="margin:0 0 24px;line-height:1.6;color:#475569">Institute: ${escapeHtml(input.organisationName)}</p>
-            <a href="${escapeHtml(input.actionUrl)}" style="display:inline-block;border-radius:10px;background:${brand.primaryColor};padding:12px 18px;color:#ffffff;text-decoration:none;font-weight:700">Open task</a>
+            <a href="${escapeHtml(input.actionUrl)}" style="display:inline-block;border-radius:10px;background:${brand.primaryColor};padding:12px 18px;color:#ffffff;text-decoration:none;font-weight:700">Open ${itemLabel}</a>
           </td></tr>
         </table>
       </td></tr>
