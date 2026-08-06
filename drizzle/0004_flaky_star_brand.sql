@@ -1,0 +1,2 @@
+DROP INDEX "email_deliveries_job_recipient_unique";--> statement-breakpoint
+ALTER TABLE "email_deliveries" ADD CONSTRAINT "email_deliveries_job_recipient_unique" UNIQUE NULLS NOT DISTINCT("job_id","recipient_email","recipient_user_id");

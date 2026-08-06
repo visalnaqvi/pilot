@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { notifications, organizationMemberships, organizations, users } from '@/db/schema'
 import { authenticateRequest, errorResponse } from '@/lib/admin-api'
 import { database } from '@/lib/db'
-import { canManageOrganization } from '@/lib/services/access'
+import { canAdministerOrganization, canManageOrganization } from '@/lib/services/access'
 import { clientOrganizationNameForHostname } from '@/lib/branding'
 
 const createSchema = z.object({
@@ -16,7 +16,14 @@ const updateSchema = z.object({
   userId: z.string().min(1),
   status: z.enum(['pending', 'accepted', 'declined']).optional(),
   role: z.enum(['teacher', 'student']).optional(),
+  notificationEmails: z.array(z.string().trim().toLowerCase().email().max(320)).max(20)
+    .transform(emails => [...new Set(emails)]).optional(),
 })
+
+function serializeMembership<T extends { notificationEmails: string[] }>(item: T, includeNotificationEmails = false) {
+  const { notificationEmails, ...publicItem } = item
+  return includeNotificationEmails ? { ...publicItem, notificationEmails } : publicItem
+}
 
 export async function GET(request: Request) {
   const auth = await authenticateRequest(request)
@@ -25,6 +32,7 @@ export async function GET(request: Request) {
     const db = database()
     const requestedOrganization = new URL(request.url).searchParams.get('organizationId')
     const managed = requestedOrganization && await canManageOrganization(auth.user, requestedOrganization)
+    const administered = requestedOrganization && await canAdministerOrganization(auth.user, requestedOrganization)
     const clientOrganizationName = clientOrganizationNameForHostname(
       request.headers.get('host') || new URL(request.url).hostname,
     )
@@ -43,6 +51,7 @@ export async function GET(request: Request) {
         role: organizationMemberships.role,
         status: organizationMemberships.status,
         initiatedBy: organizationMemberships.initiatedBy,
+        notificationEmails: organizationMemberships.notificationEmails,
         createdAt: organizationMemberships.createdAt,
       })
       .from(organizationMemberships)
@@ -59,7 +68,10 @@ export async function GET(request: Request) {
             : sql`false`
           : eq(organizationMemberships.userId, auth.user.uid))
     return Response.json({
-      items: rows.map(row => ({ ...row, createdAt: row.createdAt.toISOString() })),
+      items: rows.map(row => ({
+        ...serializeMembership(row, Boolean(administered)),
+        createdAt: row.createdAt.toISOString(),
+      })),
       nextCursor: null,
     })
   } catch (error) {
@@ -112,7 +124,7 @@ export async function POST(request: Request) {
       dedupeKey: `membership:${parsed.data.organizationId}:${targetUserId}:created`,
       visibleAt: new Date(),
     }).onConflictDoNothing()
-    return Response.json({ item }, { status: 201 })
+    return Response.json({ item: serializeMembership(item, Boolean(parsed.data.email && manager)) }, { status: 201 })
   } catch (error) {
     return errorResponse(error, 'Unable to create membership request.')
   }
@@ -134,8 +146,24 @@ export async function PATCH(request: Request) {
         return Response.json({ error: `This deployment only allows membership in ${clientOrganizationName}.` }, { status: 403 })
       }
     }
-    if (!ownDecision && !(await canManageOrganization(auth.user, parsed.data.organizationId))) {
+    const administrativeChange = parsed.data.role !== undefined || parsed.data.notificationEmails !== undefined
+    const canAdminister = await canAdministerOrganization(auth.user, parsed.data.organizationId)
+    if (administrativeChange && !canAdminister) {
+      return Response.json({ error: 'Institute owner or administrator access required.' }, { status: 403 })
+    }
+    if (!ownDecision && !administrativeChange && !(await canManageOrganization(auth.user, parsed.data.organizationId))) {
       return Response.json({ error: 'You cannot update this membership.' }, { status: 403 })
+    }
+    if (parsed.data.notificationEmails !== undefined) {
+      const membership = (await database().select({ role: organizationMemberships.role })
+        .from(organizationMemberships).where(and(
+          eq(organizationMemberships.organizationId, parsed.data.organizationId),
+          eq(organizationMemberships.userId, parsed.data.userId),
+        )).limit(1))[0]
+      if (!membership) return Response.json({ error: 'Membership not found.' }, { status: 404 })
+      if (membership.role !== 'student') {
+        return Response.json({ error: 'Notification emails can only be set for students.' }, { status: 409 })
+      }
     }
     const changes = {
       ...(parsed.data.status ? {
@@ -143,6 +171,7 @@ export async function PATCH(request: Request) {
         respondedAt: parsed.data.status === 'pending' ? null : new Date(),
       } : {}),
       ...(parsed.data.role ? { role: parsed.data.role } : {}),
+      ...(parsed.data.notificationEmails !== undefined ? { notificationEmails: parsed.data.notificationEmails } : {}),
       updatedAt: new Date(),
     }
     const [item] = await database().update(organizationMemberships).set(changes).where(and(
@@ -150,7 +179,7 @@ export async function PATCH(request: Request) {
       eq(organizationMemberships.userId, parsed.data.userId),
     )).returning()
     if (!item) return Response.json({ error: 'Membership not found.' }, { status: 404 })
-    return Response.json({ item })
+    return Response.json({ item: serializeMembership(item, canAdminister) })
   } catch (error) {
     return errorResponse(error, 'Unable to update membership.')
   }
@@ -165,7 +194,7 @@ export async function DELETE(request: Request) {
     const userId = url.searchParams.get('userId')
     if (!organizationId || !userId) return Response.json({ error: 'Organization and user are required.' }, { status: 400 })
     const ownMembership = userId === auth.user.uid
-    if (!ownMembership && !(await canManageOrganization(auth.user, organizationId))) {
+    if (!ownMembership && !(await canAdministerOrganization(auth.user, organizationId))) {
       return Response.json({ error: 'You cannot remove this membership.' }, { status: 403 })
     }
     await database().delete(organizationMemberships).where(and(

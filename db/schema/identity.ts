@@ -58,6 +58,7 @@ export const organizationMemberships = pgTable('organization_memberships', {
   role: membershipRole('role').notNull(),
   status: membershipStatus('status').notNull().default('pending'),
   initiatedBy: text('initiated_by').notNull().references(() => users.id, { onDelete: 'restrict' }),
+  notificationEmails: text('notification_emails').array().notNull().default(sql`ARRAY[]::text[]`),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   respondedAt: timestamp('responded_at', { withTimezone: true }),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),

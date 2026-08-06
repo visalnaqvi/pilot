@@ -8,7 +8,7 @@ import {
   primaryKey,
   text,
   timestamp,
-  uniqueIndex,
+  unique,
   uuid,
 } from 'drizzle-orm/pg-core'
 import { organizations, users } from './identity'
@@ -76,7 +76,9 @@ export const emailDeliveries = pgTable('email_deliveries', {
   error: text('error'),
   attemptedAt: timestamp('attempted_at', { withTimezone: true }).notNull().defaultNow(),
 }, table => [
-  uniqueIndex('email_deliveries_job_recipient_unique').on(table.jobId, table.recipientEmail),
+  unique('email_deliveries_job_recipient_unique')
+    .on(table.jobId, table.recipientEmail, table.recipientUserId)
+    .nullsNotDistinct(),
   index('email_deliveries_recipient_idx').on(table.recipientUserId),
 ])
 

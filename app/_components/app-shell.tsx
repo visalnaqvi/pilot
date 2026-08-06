@@ -202,7 +202,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     <Link href="/organisation/users" className={workspaceTab('/organisation/users')}>Students</Link>
                   </>
                 ) : (
-                  <Link href="/admin/users" className={workspaceTab('/admin/users')}>Students</Link>
+                  <>
+                    <Link href="/admin/users" className={workspaceTab('/admin/users')}>Accounts</Link>
+                    <Link href="/organisation/users" className={workspaceTab('/organisation/users')}>Institute students</Link>
+                  </>
                 )}
               </div>
             </nav>

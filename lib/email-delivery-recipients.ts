@@ -15,6 +15,17 @@ export function organizationNotificationRecipients(organization?: {
   }))
 }
 
+export function studentNotificationRecipients(student: {
+  id: string
+  name: string
+}, notificationEmails: string[]): EmailDeliveryRecipient[] {
+  return notificationEmails.map(email => ({
+    id: student.id,
+    email,
+    name: student.name,
+  }))
+}
+
 export function uniqueByRecipientEmail<T extends { recipient: { email: string } }>(deliveries: T[]) {
   const byEmail = new Map<string, T>()
   for (const delivery of deliveries) {

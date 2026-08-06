@@ -51,6 +51,14 @@ test('organizations store notification email recipients', () => {
   assert.match(migration, /ALTER TABLE "organizations" ADD COLUMN "notification_emails" text\[\]/)
 })
 
+test('student memberships store student-specific notification email recipients', () => {
+  assert.match(migration, /ALTER TABLE "organization_memberships" ADD COLUMN "notification_emails" text\[\]/)
+})
+
+test('email delivery uniqueness keeps shared guardian addresses separate by student', () => {
+  assert.match(migration, /email_deliveries_job_recipient_unique[\s\S]*job_id[\s\S]*recipient_email[\s\S]*recipient_user_id/i)
+})
+
 test('removed exam-information tables are absent', () => {
   assert.doesNotMatch(migration, /exam_(cycles|updates|revisions|refresh|sources|evidence)/i)
 })
@@ -88,6 +96,12 @@ test('organization event email worker includes de-duplicated notification recipi
   assert.match(worker, /organizationNotificationRecipients\(organization\)/)
   assert.match(worker, /uniqueByRecipientEmail/)
   assert.match(worker, /notificationCopy: true/)
+})
+
+test('assignment result emails include each students notification recipients', () => {
+  const worker = readFileSync(join(process.cwd(), 'lib', 'email-worker.ts'), 'utf8')
+  assert.match(worker, /studentNotificationRecipients/)
+  assert.match(worker, /recipient_type: 'student_notification'/)
 })
 
 test('timetable publishing queues deduplicated 7 AM agendas instead of publication emails', () => {

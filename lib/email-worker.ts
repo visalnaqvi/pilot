@@ -1,6 +1,6 @@
 import 'server-only'
 
-import { and, eq, inArray, sql } from 'drizzle-orm'
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm'
 import {
   assignmentBatches,
   assignmentRecipients,
@@ -9,6 +9,7 @@ import {
   emailJobs,
   organizationGroupMembers,
   organizationGroups,
+  organizationMemberships,
   organizations,
   taskAssignees,
   taskGroups,
@@ -31,6 +32,7 @@ import { database } from '@/lib/db'
 import { sendEmail } from '@/lib/email'
 import {
   organizationNotificationRecipients,
+  studentNotificationRecipients,
   uniqueByRecipientEmail,
   type EmailDeliveryRecipient,
 } from '@/lib/email-delivery-recipients'
@@ -381,6 +383,16 @@ async function assignmentResultDeliveries(job: ClaimedJob): Promise<PreparedDeli
   const submissions = await database().select().from(testSubmissions)
     .where(eq(testSubmissions.assignmentBatchId, assignment.id))
   const recipients = await database().select().from(users).where(inArray(users.id, recipientIds))
+  const memberships = await database().select({
+    userId: organizationMemberships.userId,
+    notificationEmails: organizationMemberships.notificationEmails,
+  }).from(organizationMemberships).where(and(
+    eq(organizationMemberships.organizationId, assignment.organizationId),
+    eq(organizationMemberships.role, 'student'),
+    eq(organizationMemberships.status, 'accepted'),
+    inArray(organizationMemberships.userId, recipientIds),
+  ))
+  const notificationEmailsByUser = new Map(memberships.map(item => [item.userId, item.notificationEmails]))
   const baseUrl = appBaseUrl()
   const brand = getBrandConfig(new URL(baseUrl).hostname)
   const timeZone = process.env.APP_TIME_ZONE || 'Asia/Kolkata'
@@ -388,46 +400,58 @@ async function assignmentResultDeliveries(job: ClaimedJob): Promise<PreparedDeli
   return recipients.flatMap(recipient => {
     const attempts = submissions.filter(submission => submission.userId === recipient.id)
     if (!attempts.length) return []
-    return [{
-      recipient,
+    const content = buildAssignmentResultEmail({
       brand,
-      content: buildAssignmentResultEmail({
+      appUrl: baseUrl,
+      recipientName: recipient.name,
+      organisationName: organization?.name || brand.organizationName || 'Institute',
+      assignmentName: assignment.name,
+      testTitle: attempts[0].testTitle,
+      attempts: attempts.map(attempt => ({
+        attemptNumber: attempt.attemptNumber,
+        score: attempt.score || 0,
+        totalMarks: attempt.totalMarks,
+        gradingStatus: attempt.gradingStatus,
+        submittedAt: attempt.submittedAt,
+      })),
+      actionUrl: `${baseUrl}/submissions`,
+      timeZone,
+    })
+    const metadata = {
+      job_id: job.id,
+      assignment_id: assignment.id,
+      user_id: recipient.id,
+      event_type: 'assignment_results',
+    }
+    const notificationRecipients = studentNotificationRecipients(
+      recipient,
+      notificationEmailsByUser.get(recipient.id) || [],
+    )
+    return uniqueByRecipientEmail([
+      { recipient, brand, content, metadata },
+      ...notificationRecipients.map(notificationRecipient => ({
+        recipient: notificationRecipient,
         brand,
-        appUrl: baseUrl,
-        recipientName: recipient.name,
-        organisationName: organization?.name || brand.organizationName || 'Institute',
-        assignmentName: assignment.name,
-        testTitle: attempts[0].testTitle,
-        attempts: attempts.map(attempt => ({
-          attemptNumber: attempt.attemptNumber,
-          score: attempt.score || 0,
-          totalMarks: attempt.totalMarks,
-          gradingStatus: attempt.gradingStatus,
-          submittedAt: attempt.submittedAt,
-        })),
-        actionUrl: `${baseUrl}/submissions`,
-        timeZone,
-      }),
-      metadata: {
-        job_id: job.id,
-        assignment_id: assignment.id,
-        user_id: recipient.id,
-        event_type: 'assignment_results',
-      },
-    }]
+        content,
+        metadata: { ...metadata, recipient_type: 'student_notification' },
+      })),
+    ])
   })
 }
 
-async function existingDelivery(jobId: string, recipientEmail: string) {
+async function existingDelivery(jobId: string, recipientEmail: string, recipientUserId: string | null) {
   return (await database().select().from(emailDeliveries).where(and(
     eq(emailDeliveries.jobId, jobId),
     eq(emailDeliveries.recipientEmail, recipientEmail),
+    recipientUserId === null
+      ? isNull(emailDeliveries.recipientUserId)
+      : eq(emailDeliveries.recipientUserId, recipientUserId),
   )).limit(1))[0]
 }
 
 async function deliver(job: ClaimedJob, delivery: PreparedDelivery) {
   const { recipient, content, metadata, brand } = delivery
-  const existing = await existingDelivery(job.id, recipient.email)
+  const existing = await existingDelivery(job.id, recipient.email, recipient.id)
   if (existing?.status === 'sent' || existing?.status === 'skipped') return true
   if (!isEmailAddress(recipient.email)) {
     await database().insert(emailDeliveries).values({
@@ -437,7 +461,7 @@ async function deliver(job: ClaimedJob, delivery: PreparedDelivery) {
       status: 'skipped',
       error: 'Missing or invalid email address.',
     }).onConflictDoUpdate({
-      target: [emailDeliveries.jobId, emailDeliveries.recipientEmail],
+      target: [emailDeliveries.jobId, emailDeliveries.recipientEmail, emailDeliveries.recipientUserId],
       set: { status: 'skipped', error: 'Missing or invalid email address.', attemptedAt: new Date() },
     })
     return true
@@ -451,7 +475,7 @@ async function deliver(job: ClaimedJob, delivery: PreparedDelivery) {
       status: 'sent',
       providerMessageId: result.providerMessageId,
     }).onConflictDoUpdate({
-      target: [emailDeliveries.jobId, emailDeliveries.recipientEmail],
+      target: [emailDeliveries.jobId, emailDeliveries.recipientEmail, emailDeliveries.recipientUserId],
       set: { status: 'sent', providerMessageId: result.providerMessageId, error: null, attemptedAt: new Date() },
     })
     return true
@@ -465,7 +489,7 @@ async function deliver(job: ClaimedJob, delivery: PreparedDelivery) {
       status: 'failed',
       error: message,
     }).onConflictDoUpdate({
-      target: [emailDeliveries.jobId, emailDeliveries.recipientEmail],
+      target: [emailDeliveries.jobId, emailDeliveries.recipientEmail, emailDeliveries.recipientUserId],
       set: { status: 'failed', error: message, attemptedAt: new Date() },
     })
     return false
