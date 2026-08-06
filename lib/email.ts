@@ -12,8 +12,8 @@ export type EmailContent = {
   brand?: BrandConfig
 }
 
-export function isEmailConfigured() {
-  return Boolean(process.env.SENDGRID_API_KEY && resolveEmailSender(getBrandConfig()).address)
+export function isEmailConfigured(brand: BrandConfig = getBrandConfig()) {
+  return Boolean(process.env.SENDGRID_API_KEY && resolveEmailSender(brand).address)
 }
 
 export async function sendEmail({ to, subject, text, html, metadata, brand }: EmailContent) {

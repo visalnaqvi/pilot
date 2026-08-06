@@ -11,6 +11,9 @@ import {
 } from '../lib/attendance'
 import { memberRole, isAcceptedMember } from '../lib/membership'
 import { openAttendanceSchema, saveAttendanceSchema } from '../lib/attendance-schema'
+import { buildAttendanceAbsenceEmail } from '../lib/attendance-email-content'
+import { attendanceAbsenceEmailJobKey } from '../lib/attendance-email-plan'
+import { resolveBrandConfig } from '../lib/branding'
 import type { TimetableEntry } from '../lib/timetable'
 
 const monday: TimetableEntry = {
@@ -133,6 +136,39 @@ test('opening an attendance occurrence defaults to attendance and supports cance
   const attendance = openAttendanceSchema.parse(occurrence)
   assert.equal(attendance.intent, 'attendance')
   assert.equal(openAttendanceSchema.parse({ ...occurrence, intent: 'cancel' }).intent, 'cancel')
+})
+
+test('absence emails are branded, escaped, and deduplicated per session and student', () => {
+  const brand = resolveBrandConfig({
+    name: 'Example Academy',
+    shortName: 'EA',
+    logoAlt: 'Example Academy logo',
+    primaryColor: '#055527',
+    email: { logoUrl: '/academy/email-logo.png' },
+  })
+  const email = buildAttendanceAbsenceEmail({
+    brand,
+    appUrl: 'https://academy.example',
+    recipientName: '<Student>',
+    organisationName: 'Example & Academy',
+    subject: '<Mathematics>',
+    classDate: '2026-08-06',
+    startTime: '09:00',
+    endTime: '10:00',
+    actionUrl: 'https://academy.example/attendance',
+  })
+
+  assert.match(email.subject, /absent from <Mathematics>/)
+  assert.match(email.text, /Thursday, 6 August 2026/)
+  assert.match(email.html, /https:\/\/academy\.example\/academy\/email-logo\.png/)
+  assert.match(email.html, /#055527/)
+  assert.doesNotMatch(email.html, /<Student>/)
+  assert.doesNotMatch(email.html, /<Mathematics>/)
+  assert.match(email.html, /&lt;Mathematics&gt;/)
+  assert.equal(
+    attendanceAbsenceEmailJobKey('session-1', 'student-1'),
+    'attendance:session-1:absent:student-1',
+  )
 })
 
 test('legacy institute memberships remain students and teacher roles are explicit', () => {

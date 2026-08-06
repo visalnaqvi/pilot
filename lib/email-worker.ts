@@ -4,6 +4,7 @@ import { and, eq, inArray, sql } from 'drizzle-orm'
 import {
   assignmentBatches,
   assignmentRecipients,
+  attendanceSessions,
   emailDeliveries,
   emailJobs,
   organizationGroupMembers,
@@ -23,6 +24,8 @@ import {
   users,
 } from '@/db/schema'
 import { appBaseUrl } from '@/lib/app-url'
+import { buildAttendanceAbsenceEmail } from '@/lib/attendance-email-content'
+import { getBrandConfig, type BrandConfig } from '@/lib/branding'
 import { database } from '@/lib/db'
 import { sendEmail } from '@/lib/email'
 import {
@@ -46,6 +49,7 @@ type PreparedDelivery = {
   recipient: EmailDeliveryRecipient
   content: { subject: string; text: string; html?: string }
   metadata: Record<string, string>
+  brand?: BrandConfig
 }
 
 const leaseMilliseconds = 5 * 60_000
@@ -319,6 +323,44 @@ async function timetableAgendaDeliveries(job: ClaimedJob): Promise<PreparedDeliv
   return uniqueByRecipientEmail([...studentDeliveries, ...notificationDeliveries])
 }
 
+async function attendanceAbsenceDeliveries(job: ClaimedJob): Promise<PreparedDelivery[]> {
+  const payload = (job.payload || {}) as JobPayload
+  const recipientIds = [...new Set(payload.recipientIds || [])]
+  if (!recipientIds.length) return []
+  const session = (await database().select().from(attendanceSessions)
+    .where(eq(attendanceSessions.id, job.entityId)).limit(1))[0]
+  if (!session) return []
+  const entry = (await database().select().from(timetableEntries)
+    .where(eq(timetableEntries.id, session.timetableEntryId)).limit(1))[0]
+  const organization = (await database().select().from(organizations)
+    .where(eq(organizations.id, session.organizationId)).limit(1))[0]
+  const recipients = await database().select().from(users).where(inArray(users.id, recipientIds))
+  const baseUrl = appBaseUrl()
+  const brand = getBrandConfig(new URL(baseUrl).hostname)
+
+  return recipients.map(recipient => ({
+    recipient,
+    brand,
+    content: buildAttendanceAbsenceEmail({
+      brand,
+      appUrl: baseUrl,
+      recipientName: recipient.name,
+      organisationName: organization?.name || brand.organizationName || 'Institute',
+      subject: entry?.subject || 'Class',
+      classDate: session.classDate,
+      startTime: entry?.startTime,
+      endTime: entry?.endTime,
+      actionUrl: `${baseUrl}/attendance`,
+    }),
+    metadata: {
+      job_id: job.id,
+      session_id: session.id,
+      user_id: recipient.id,
+      event_type: 'attendance_absent',
+    },
+  }))
+}
+
 async function existingDelivery(jobId: string, recipientEmail: string) {
   return (await database().select().from(emailDeliveries).where(and(
     eq(emailDeliveries.jobId, jobId),
@@ -327,7 +369,7 @@ async function existingDelivery(jobId: string, recipientEmail: string) {
 }
 
 async function deliver(job: ClaimedJob, delivery: PreparedDelivery) {
-  const { recipient, content, metadata } = delivery
+  const { recipient, content, metadata, brand } = delivery
   const existing = await existingDelivery(job.id, recipient.email)
   if (existing?.status === 'sent' || existing?.status === 'skipped') return true
   if (!isEmailAddress(recipient.email)) {
@@ -344,7 +386,7 @@ async function deliver(job: ClaimedJob, delivery: PreparedDelivery) {
     return true
   }
   try {
-    const result = await sendEmail({ to: recipient.email, ...content, metadata })
+    const result = await sendEmail({ to: recipient.email, ...content, metadata, brand })
     await database().insert(emailDeliveries).values({
       jobId: job.id,
       recipientUserId: recipient.id,
@@ -400,7 +442,9 @@ async function processClaimedJob(job: ClaimedJob, now: Date) {
 
   const deliveries = job.kind === 'timetable_agenda'
     ? await timetableAgendaDeliveries(job)
-    : await taskDeliveries(job)
+    : job.kind === 'attendance_absent'
+      ? await attendanceAbsenceDeliveries(job)
+      : await taskDeliveries(job)
   const results = await mapWithConcurrency(deliveries, 8, delivery => deliver(job, delivery))
   const failedDeliveries = results.filter(result => !result).length
   const attempts = job.attempts + 1

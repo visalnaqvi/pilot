@@ -1,9 +1,11 @@
 import { and, eq } from 'drizzle-orm'
+import { after } from 'next/server'
 import { z } from 'zod'
 import {
   attendanceMarks,
   attendanceRevisions,
   attendanceSessions,
+  emailJobs,
   organizations,
   timetableEntries,
   timetables,
@@ -11,8 +13,28 @@ import {
   users,
 } from '@/db/schema'
 import { authenticateRequest, errorResponse } from '@/lib/admin-api'
+import { appBaseUrl } from '@/lib/app-url'
+import { attendanceAbsenceEmailJobKey } from '@/lib/attendance-email-plan'
+import { getBrandConfig } from '@/lib/branding'
 import { database } from '@/lib/db'
+import { isEmailConfigured } from '@/lib/email'
+import { processEmailJob } from '@/lib/email-worker'
 import { canManageOrganization } from '@/lib/services/access'
+
+export const runtime = 'nodejs'
+export const maxDuration = 60
+
+function queueImmediateAbsenceEmails(jobIds: string[]) {
+  const baseUrl = appBaseUrl()
+  const brand = getBrandConfig(new URL(baseUrl).hostname)
+  if (!jobIds.length || !isEmailConfigured(brand)) return
+  after(async () => {
+    const results = await Promise.allSettled(jobIds.map(jobId => processEmailJob(jobId)))
+    for (const result of results) {
+      if (result.status === 'rejected') console.error('Immediate attendance email processing failed.', result.reason)
+    }
+  })
+}
 
 const updateSchema = z.object({
   status: z.enum(['draft', 'submitted', 'cancelled']),
@@ -119,7 +141,7 @@ export async function PUT(request: Request, context: { params: Promise<{ id: str
         && parsed.data.marks.every(mark => mark.mark !== 'unmarked')
       if (!complete) return Response.json({ error: 'Mark every student exactly once before submitting attendance.' }, { status: 400 })
     }
-    await database().transaction(async tx => {
+    const queuedEmailJobIds = await database().transaction(async tx => {
       const nextRevision = current.revision + 1
       await tx.insert(attendanceRevisions).values({
         sessionId: id,
@@ -142,7 +164,25 @@ export async function PUT(request: Request, context: { params: Promise<{ id: str
         submittedAt: parsed.data.status === 'submitted' ? new Date() : null,
         cancelledAt: parsed.data.status === 'cancelled' ? new Date() : null,
       }).where(eq(attendanceSessions.id, id))
+      if (parsed.data.status !== 'submitted') return []
+      const absentUserIds = parsed.data.marks
+        .filter(mark => mark.mark === 'absent')
+        .map(mark => mark.userId)
+      if (!absentUserIds.length) return []
+      const now = new Date()
+      const jobs = await tx.insert(emailJobs).values(absentUserIds.map(userId => ({
+        kind: 'attendance_absent',
+        organizationId: current.organizationId,
+        entityType: 'attendance_session',
+        entityId: id,
+        payload: { recipientIds: [userId] },
+        scheduledFor: now,
+        nextAttemptAt: now,
+        dedupeKey: attendanceAbsenceEmailJobKey(id, userId),
+      }))).onConflictDoNothing().returning({ id: emailJobs.id })
+      return jobs.map(job => job.id)
     })
+    queueImmediateAbsenceEmails(queuedEmailJobIds)
     return Response.json({ session: await load(id) })
   } catch (error) {
     return errorResponse(error, 'Unable to update attendance.')
