@@ -24,6 +24,7 @@ import {
   users,
 } from '@/db/schema'
 import { appBaseUrl } from '@/lib/app-url'
+import { buildAssignmentResultEmail } from '@/lib/assignment-result-email-content'
 import { buildAttendanceAbsenceEmail } from '@/lib/attendance-email-content'
 import { getBrandConfig, type BrandConfig } from '@/lib/branding'
 import { database } from '@/lib/db'
@@ -361,6 +362,62 @@ async function attendanceAbsenceDeliveries(job: ClaimedJob): Promise<PreparedDel
   }))
 }
 
+async function assignmentResultDeliveries(job: ClaimedJob): Promise<PreparedDelivery[]> {
+  const payload = (job.payload || {}) as JobPayload
+  const requestedRecipientIds = new Set(payload.recipientIds || [])
+  if (!requestedRecipientIds.size) return []
+
+  const assignment = (await database().select().from(assignmentBatches)
+    .where(eq(assignmentBatches.id, job.entityId)).limit(1))[0]
+  if (!assignment) return []
+  const organization = (await database().select().from(organizations)
+    .where(eq(organizations.id, assignment.organizationId)).limit(1))[0]
+  const assignedRecipientIds = new Set((await database().select({ userId: assignmentRecipients.userId })
+    .from(assignmentRecipients)
+    .where(eq(assignmentRecipients.assignmentBatchId, assignment.id))).map(row => row.userId))
+  const recipientIds = [...requestedRecipientIds].filter(userId => assignedRecipientIds.has(userId))
+  if (!recipientIds.length) return []
+
+  const submissions = await database().select().from(testSubmissions)
+    .where(eq(testSubmissions.assignmentBatchId, assignment.id))
+  const recipients = await database().select().from(users).where(inArray(users.id, recipientIds))
+  const baseUrl = appBaseUrl()
+  const brand = getBrandConfig(new URL(baseUrl).hostname)
+  const timeZone = process.env.APP_TIME_ZONE || 'Asia/Kolkata'
+
+  return recipients.flatMap(recipient => {
+    const attempts = submissions.filter(submission => submission.userId === recipient.id)
+    if (!attempts.length) return []
+    return [{
+      recipient,
+      brand,
+      content: buildAssignmentResultEmail({
+        brand,
+        appUrl: baseUrl,
+        recipientName: recipient.name,
+        organisationName: organization?.name || brand.organizationName || 'Institute',
+        assignmentName: assignment.name,
+        testTitle: attempts[0].testTitle,
+        attempts: attempts.map(attempt => ({
+          attemptNumber: attempt.attemptNumber,
+          score: attempt.score || 0,
+          totalMarks: attempt.totalMarks,
+          gradingStatus: attempt.gradingStatus,
+          submittedAt: attempt.submittedAt,
+        })),
+        actionUrl: `${baseUrl}/submissions`,
+        timeZone,
+      }),
+      metadata: {
+        job_id: job.id,
+        assignment_id: assignment.id,
+        user_id: recipient.id,
+        event_type: 'assignment_results',
+      },
+    }]
+  })
+}
+
 async function existingDelivery(jobId: string, recipientEmail: string) {
   return (await database().select().from(emailDeliveries).where(and(
     eq(emailDeliveries.jobId, jobId),
@@ -444,7 +501,9 @@ async function processClaimedJob(job: ClaimedJob, now: Date) {
     ? await timetableAgendaDeliveries(job)
     : job.kind === 'attendance_absent'
       ? await attendanceAbsenceDeliveries(job)
-      : await taskDeliveries(job)
+      : job.kind === 'assignment_results'
+        ? await assignmentResultDeliveries(job)
+        : await taskDeliveries(job)
   const results = await mapWithConcurrency(deliveries, 8, delivery => deliver(job, delivery))
   const failedDeliveries = results.filter(result => !result).length
   const attempts = job.attempts + 1
