@@ -9,6 +9,10 @@ export type BrandConfig = {
   accentColor: string
   tagline: string
   description: string
+  email?: {
+    fromAddress?: string
+    fromName?: string
+  }
 }
 
 const DEFAULT_BRAND = {
@@ -73,6 +77,8 @@ export function createBrandPalette(color: string) {
 
 export function resolveBrandConfig(definition: BrandingDefinition): BrandConfig {
   const name = valueOrDefault(definition.name, DEFAULT_BRAND.name)
+  const fromAddress = definition.email?.fromAddress?.trim()
+  const fromName = definition.email?.fromName?.trim()
   return {
     name,
     shortName: valueOrDefault(definition.shortName, name.toUpperCase()),
@@ -82,6 +88,12 @@ export function resolveBrandConfig(definition: BrandingDefinition): BrandConfig 
     accentColor: normalizeHexColor(definition.accentColor, DEFAULT_BRAND.accentColor),
     tagline: valueOrDefault(definition.tagline, DEFAULT_BRAND.tagline),
     description: valueOrDefault(definition.description, DEFAULT_BRAND.description),
+    ...(fromAddress || fromName ? {
+      email: {
+        ...(fromAddress ? { fromAddress } : {}),
+        ...(fromName ? { fromName } : {}),
+      },
+    } : {}),
   }
 }
 

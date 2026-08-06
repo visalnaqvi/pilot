@@ -20,7 +20,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const canTeach = profile?.membershipRole === 'teacher'
 
   useEffect(() => {
-    if (ready && !user) router.replace('/login')
+    if (!ready) return
+    if (!user) router.replace('/login')
+    else if (!user.emailVerified) router.replace('/verify-email')
   }, [ready, router, user])
   useEffect(() => {
     if (!mobileMenuOpen) return
@@ -36,7 +38,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     }
   }, [mobileMenuOpen])
 
-  if (!ready || !user) {
+  if (!ready || !user || !user.emailVerified) {
     return <main className="grid min-h-screen place-items-center text-slate-500">Loading {brand.name}…</main>
   }
 

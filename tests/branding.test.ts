@@ -9,6 +9,7 @@ test('branding reads the branch-owned MockPilot configuration', () => {
   assert.equal(brand.primaryColor, '#4f46e5')
   assert.equal(brand.accentColor, '#7c3aed')
   assert.equal(brand.logoUrl, undefined)
+  assert.deepEqual(brand.email, { fromName: 'MockPilot' })
 })
 
 test('branding accepts a client identity and normalizes its colors', () => {
@@ -30,6 +31,20 @@ test('branding accepts a client identity and normalizes its colors', () => {
     accentColor: '#ea580c',
     tagline: 'Learn with confidence.',
     description: 'Create and take practice mock tests.',
+  })
+})
+
+test('branding trims branch-owned email sender settings', () => {
+  const brand = resolveBrandConfig({
+    name: 'Example Academy',
+    email: {
+      fromAddress: ' accounts@example.edu ',
+      fromName: ' Example Accounts ',
+    },
+  })
+  assert.deepEqual(brand.email, {
+    fromAddress: 'accounts@example.edu',
+    fromName: 'Example Accounts',
   })
 })
 

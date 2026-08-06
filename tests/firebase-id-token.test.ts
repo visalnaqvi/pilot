@@ -19,6 +19,7 @@ function token(overrides: Record<string, unknown> = {}) {
     iat: now - 60,
     auth_time: now - 120,
     email: 'user@example.com',
+    email_verified: true,
     name: 'Test User',
     ...overrides,
   })).toString('base64url')
@@ -29,7 +30,31 @@ function token(overrides: Record<string, unknown> = {}) {
 test('Firebase token verification accepts a valid signed token', () => {
   assert.deepEqual(
     verifyFirebaseIdTokenWithCertificates(token(), projectId, { [keyId]: publicKeyPem }, now),
-    { uid: 'user-123', email: 'user@example.com', name: 'Test User' },
+    { uid: 'user-123', email: 'user@example.com', emailVerified: true, name: 'Test User' },
+  )
+})
+
+test('Firebase token verification exposes an unverified email claim', () => {
+  assert.equal(
+    verifyFirebaseIdTokenWithCertificates(
+      token({ email_verified: false }),
+      projectId,
+      { [keyId]: publicKeyPem },
+      now,
+    ).emailVerified,
+    false,
+  )
+})
+
+test('Firebase token verification treats a missing email verification claim as unverified', () => {
+  assert.equal(
+    verifyFirebaseIdTokenWithCertificates(
+      token({ email_verified: undefined }),
+      projectId,
+      { [keyId]: publicKeyPem },
+      now,
+    ).emailVerified,
+    false,
   )
 })
 

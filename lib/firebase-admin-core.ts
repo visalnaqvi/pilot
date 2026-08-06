@@ -23,3 +23,4 @@ function adminApp() {
 }
 
 export const adminStorageCore = admin.storage(adminApp())
+export const adminAuthCore = admin.auth(adminApp())

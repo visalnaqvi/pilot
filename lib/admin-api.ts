@@ -7,8 +7,9 @@ import {
   organizations,
   users,
 } from '@/db/schema'
-import { verifyFirebaseIdToken } from '@/lib/firebase-id-token'
+import { authenticateFirebaseRequest } from '@/lib/firebase-request-auth'
 import { profileDisplayName } from '@/lib/profile-display-name'
+import { EMAIL_NOT_VERIFIED_CODE, hasVerifiedEmail } from '@/lib/email-verification'
 
 export type ServerRole = 'user' | 'organisation' | 'admin'
 export type MembershipRole = 'owner' | 'teacher' | 'student'
@@ -93,13 +94,19 @@ async function userContext(uid: string): Promise<ServerUser | null> {
 }
 
 export async function authenticateRequest(request: Request) {
-  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
-  if (!token) {
-    return { error: Response.json({ error: 'Authentication required.' }, { status: 401 }) } as const
-  }
+  const identity = await authenticateFirebaseRequest(request)
+  if (!identity.ok) return { error: identity.error } as const
+  const decoded = identity.token
 
   try {
-    const decoded = await verifyFirebaseIdToken(token)
+    if (!hasVerifiedEmail(decoded)) {
+      return {
+        error: Response.json({
+          error: 'Verify your email address before continuing.',
+          code: EMAIL_NOT_VERIFIED_CODE,
+        }, { status: 403 }),
+      } as const
+    }
     await ensureUser(decoded)
     const actor = await userContext(decoded.uid)
     if (!actor) throw new Error('Unable to bootstrap your account.')

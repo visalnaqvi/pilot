@@ -9,6 +9,9 @@ export default function Home() {
   const router = useRouter()
   const brand = useBrand()
   const { user, ready } = useAuth()
-  useEffect(() => { if (ready) router.replace(user ? '/dashboard' : '/login') }, [ready, router, user])
+  useEffect(() => {
+    if (!ready) return
+    router.replace(!user ? '/login' : user.emailVerified ? '/dashboard' : '/verify-email')
+  }, [ready, router, user])
   return <main className="grid min-h-screen place-items-center text-slate-500">Loading {brand.name}…</main>
 }

@@ -7,6 +7,10 @@ export type BrandingDefinition = {
   accentColor?: string
   tagline?: string
   description?: string
+  email?: {
+    fromAddress?: string
+    fromName?: string
+  }
 }
 
 /**
@@ -25,6 +29,11 @@ const branding = {
   accentColor: '#7c3aed',
   tagline: 'Practice with purpose.',
   description: 'Create and take practice mock tests.',
+  email: {
+    // Set a SendGrid-verified client address here. EMAIL_FROM_ADDRESS is the fallback.
+    fromAddress: '',
+    fromName: 'MockPilot',
+  },
 } satisfies BrandingDefinition
 
 export default branding

@@ -27,6 +27,13 @@ export const users = pgTable('users', {
   uniqueIndex('users_email_unique').on(sql`lower(${table.email})`),
 ])
 
+export const emailVerificationCooldowns = pgTable('email_verification_cooldowns', {
+  firebaseUid: text('firebase_uid').primaryKey(),
+  email: text('email').notNull(),
+  nextAllowedAt: timestamp('next_allowed_at', { withTimezone: true }).notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
 export const organizations = pgTable('organizations', {
   id: uuid('id').primaryKey().defaultRandom(),
   ownerUserId: text('owner_user_id').notNull().references(() => users.id, { onDelete: 'restrict' }),

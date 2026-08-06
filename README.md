@@ -16,6 +16,12 @@ BOOTSTRAP_ADMIN_EMAIL=admin@example.com
 
 Keep the Firebase Admin variables for ID-token verification and signed Storage operations. Never expose database or Admin credentials through `NEXT_PUBLIC_*`.
 
+### Firebase email verification
+
+Email verification is required before any account can access application data. In the Firebase console, enable the Email/Password sign-in provider and add every local, preview, and production hostname to Authentication → Settings → Authorized domains. Firebase Admin generates the secure action link, the application sends a client-branded message through SendGrid, and Firebase's hosted action handler returns users to `/verify-email`.
+
+Firebase's console verification-email body is not used for application-triggered verification messages. The generated Firebase action link must remain intact, and the configured application domain must be authorized in Firebase.
+
 ## Per-client branding
 
 Branding is configured in `config/branding.ts`, which is committed with the branch. Checking out a client branch therefore switches its logo, identity, and palette without changing local environment variables. The primary and accent colors automatically produce the full shade scales used by buttons, links, tabs, focus states, calendars, charts, and badges.
@@ -30,12 +36,16 @@ const branding = {
   accentColor: '#ea580c',
   tagline: 'Learn with confidence.',
   description: 'Practice tests from Example Academy.',
+  email: {
+    fromAddress: 'accounts@example-academy.com',
+    fromName: 'Example Academy',
+  },
 }
 ```
 
 For that example, store the asset at `public/example-academy/logo.svg`. Next.js serves files inside `public` from the site root, so the canonical config URL is `/example-academy/logo.svg`. The loader also normalizes `public/example-academy/logo.svg` and `/public/example-academy/logo.svg` to the correct URL. Absolute HTTP(S) URLs are supported as well.
 
-Use 3- or 6-digit hex values for the colors. If `logoUrl` is empty, the configured short name is shown as a text wordmark. `EMAIL_FROM_NAME` remains an optional environment override and otherwise defaults to the configured brand name; notification templates use the configured name and primary color.
+Use 3- or 6-digit hex values for the colors. If `logoUrl` is empty, the configured short name is shown as a text wordmark. All SendGrid messages prefer `email.fromAddress` and `email.fromName`; `EMAIL_FROM_ADDRESS` and `EMAIL_FROM_NAME` remain independent deployment fallbacks, with the brand name as the final sender-name fallback. Every configured sender address or domain must be verified in the active SendGrid account.
 
 ## Database
 

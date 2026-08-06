@@ -14,6 +14,7 @@ export type VerifiedFirebaseIdToken = {
   uid: string
   email?: string
   name?: string
+  emailVerified: boolean
 }
 
 type FirebaseTokenPayload = {
@@ -24,6 +25,7 @@ type FirebaseTokenPayload = {
   iat?: unknown
   auth_time?: unknown
   email?: unknown
+  email_verified?: unknown
   name?: unknown
 }
 
@@ -133,6 +135,7 @@ export function verifyFirebaseIdTokenWithCertificates(
 
   return {
     uid: payload.sub,
+    emailVerified: payload.email_verified === true,
     ...(typeof payload.email === 'string' ? { email: payload.email } : {}),
     ...(typeof payload.name === 'string' ? { name: payload.name } : {}),
   }

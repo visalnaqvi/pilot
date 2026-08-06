@@ -3,10 +3,11 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 
-const migration = readFileSync(
-  join(process.cwd(), 'drizzle', readdirSync(join(process.cwd(), 'drizzle')).find(name => name.endsWith('.sql'))!),
-  'utf8',
-)
+const migration = readdirSync(join(process.cwd(), 'drizzle'))
+  .filter(name => name.endsWith('.sql'))
+  .sort()
+  .map(name => readFileSync(join(process.cwd(), 'drizzle', name), 'utf8'))
+  .join('\n')
 
 test('initial migration contains the relational feature tables', () => {
   for (const table of [
@@ -31,6 +32,7 @@ test('initial migration contains the relational feature tables', () => {
     'attendance_sessions',
     'notifications',
     'email_jobs',
+    'email_verification_cooldowns',
   ]) {
     assert.match(migration, new RegExp(`CREATE TABLE "${table}"`))
   }
@@ -52,6 +54,19 @@ test('removed exam-information tables are absent', () => {
 test('email worker claims jobs with row locking and skip locked', () => {
   const worker = readFileSync(join(process.cwd(), 'lib', 'email-worker.ts'), 'utf8')
   assert.match(worker, /for update skip locked/i)
+})
+
+test('verification email delivery stays token-scoped and server-rate-limited', () => {
+  const route = readFileSync(join(process.cwd(), 'app', 'api', 'auth', 'verification-email', 'route.ts'), 'utf8')
+  const signup = readFileSync(join(process.cwd(), 'app', '_components', 'auth-form.tsx'), 'utf8')
+  const verification = readFileSync(join(process.cwd(), 'app', '_components', 'verify-email.tsx'), 'utf8')
+
+  assert.match(route, /authenticateFirebaseRequest/)
+  assert.match(route, /account\.email/)
+  assert.match(route, /reserveVerificationEmail/)
+  assert.match(route, /releaseVerificationEmail/)
+  assert.doesNotMatch(route, /request\.json/)
+  assert.doesNotMatch(`${signup}\n${verification}`, /sendEmailVerification/)
 })
 
 test('creation routes send only assigned jobs immediately and leave scheduled jobs for the poller', () => {

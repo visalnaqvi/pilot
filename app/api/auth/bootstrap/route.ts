@@ -3,6 +3,7 @@ import { authenticateRequest, errorResponse, profileDto } from '@/lib/admin-api'
 import { database } from '@/lib/db'
 import { users } from '@/db/schema'
 import { eq } from 'drizzle-orm'
+import { clearVerificationEmailCooldown } from '@/lib/verification-email-cooldown'
 
 const bodySchema = z.object({
   name: z.string().trim().min(1).max(160).optional(),
@@ -22,6 +23,7 @@ export async function POST(request: Request) {
         .set({ name: parsed.data.name, updatedAt: new Date() })
         .where(eq(users.id, auth.actor.uid))
     }
+    await clearVerificationEmailCooldown(auth.actor.uid)
     return Response.json({ profile: await profileDto(auth.actor.uid) })
   } catch (error) {
     return errorResponse(error, 'Unable to create your database profile.')

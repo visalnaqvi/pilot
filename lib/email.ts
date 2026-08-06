@@ -1,5 +1,6 @@
 import 'server-only'
 import { getBrandConfig } from './branding'
+import { resolveEmailSender } from './email-sender'
 
 export type EmailAddress = string
 export type EmailContent = {
@@ -11,19 +12,18 @@ export type EmailContent = {
 }
 
 export function isEmailConfigured() {
-  return Boolean(process.env.SENDGRID_API_KEY && process.env.EMAIL_FROM_ADDRESS)
+  return Boolean(process.env.SENDGRID_API_KEY && resolveEmailSender(getBrandConfig()).address)
 }
 
 export async function sendEmail({ to, subject, text, html, metadata }: EmailContent) {
   const apiKey = process.env.SENDGRID_API_KEY
-  const fromAddress = process.env.EMAIL_FROM_ADDRESS
-  const fromName = process.env.EMAIL_FROM_NAME || getBrandConfig().name
+  const sender = resolveEmailSender(getBrandConfig())
 
   if (!apiKey) {
     throw new Error('SendGrid is not configured. Set SENDGRID_API_KEY in your environment.')
   }
-  if (!fromAddress || !fromAddress.trim()) {
-    throw new Error('The sending email address is not configured. Set EMAIL_FROM_ADDRESS in your environment.')
+  if (!sender.address) {
+    throw new Error('The sending email address is not configured. Set branding.email.fromAddress or EMAIL_FROM_ADDRESS.')
   }
 
   const recipient = to.trim()
@@ -36,7 +36,7 @@ export async function sendEmail({ to, subject, text, html, metadata }: EmailCont
       to: [{ email: recipient }],
       ...(metadata && Object.keys(metadata).length ? { custom_args: metadata } : {}),
     }],
-    from: { email: fromAddress.trim(), name: fromName.trim() },
+    from: { email: sender.address, name: sender.name },
     subject: subject.trim(),
     content: [
       { type: 'text/plain', value: text },

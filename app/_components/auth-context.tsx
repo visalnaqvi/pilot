@@ -1,6 +1,6 @@
 'use client'
 
-import { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { onAuthStateChanged, type User } from 'firebase/auth'
 import { auth } from '@/lib/firebase'
 import { authenticatedFetch } from '@/lib/authenticated-fetch'
@@ -55,19 +55,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [ready, setReady] = useState(false)
 
-  const loadProfile = async (currentUser: User) => {
+  const loadProfile = useCallback(async (currentUser: User) => {
     const response = await authenticatedFetch(currentUser, '/api/me', { cache: 'no-store' })
     if (!response.ok) throw new Error('Unable to load your profile.')
     const data = await response.json() as { profile: UserProfile; actor: UserProfile | null }
     setProfile(data.profile)
     setActualProfile(data.actor || data.profile)
-  }
+  }, [])
 
   useEffect(() => onAuthStateChanged(auth, async nextUser => {
+    setReady(false)
     setActualUser(nextUser)
     setProfile(null)
     setActualProfile(null)
     if (!nextUser) {
+      window.sessionStorage.removeItem(impersonationKey)
+      setReady(true)
+      return
+    }
+    if (!nextUser.emailVerified) {
       window.sessionStorage.removeItem(impersonationKey)
       setReady(true)
       return
@@ -80,11 +86,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setReady(true)
     }
-  }), [])
+  }), [loadProfile])
 
-  const refreshProfile = async () => {
-    if (actualUser) await loadProfile(actualUser)
-  }
+  const refreshProfile = useCallback(async () => {
+    if (actualUser?.emailVerified) await loadProfile(actualUser)
+  }, [actualUser, loadProfile])
   const startImpersonating = (target: UserProfile) => {
     if (actualProfile?.role !== 'admin' || target.role === 'admin') return
     window.sessionStorage.setItem(impersonationKey, target.uid)
@@ -100,6 +106,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       ...actualUser,
       uid: profile.uid,
       email: profile.email,
+      emailVerified: actualUser.emailVerified,
       displayName: profile.name || profile.email,
       getIdToken: actualUser.getIdToken.bind(actualUser),
       getIdTokenResult: actualUser.getIdTokenResult.bind(actualUser),
