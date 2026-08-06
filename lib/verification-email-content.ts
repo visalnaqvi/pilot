@@ -15,7 +15,7 @@ function absoluteLogoUrl(logoUrl: string | undefined, appUrl: string) {
 
 export function buildVerificationEmail(input: VerificationEmailTemplateInput) {
   const name = input.recipientName?.trim() || 'there'
-  const logoUrl = absoluteLogoUrl(input.brand.logoUrl, input.appUrl)
+  const logoUrl = absoluteLogoUrl(input.brand.email?.logoUrl || input.brand.logoUrl, input.appUrl)
   const subject = `Verify your email for ${input.brand.name}`
   const text = [
     `Hi ${name},`,

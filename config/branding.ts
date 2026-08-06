@@ -11,6 +11,7 @@ export type BrandingDefinition = {
   email?: {
     fromAddress?: string
     fromName?: string
+    logoUrl?: string
   }
 }
 
@@ -57,6 +58,9 @@ export const brandingByClient = {
     description: 'Create and take practice mock tests with Aggarwal Education Center.',
     email: {
       fromName: 'Aggarwal Education Center',
+      // Email clients need a public, absolute URL and may cache failed image
+      // requests. Keep this versioned when the asset changes.
+      logoUrl: 'https://pilot.aggarwaleducationcenter.com/aggarwaleducation/Aggarwal-Education-Center-Logo.png?v=20260806',
     },
   },
 } satisfies Record<string, ClientBrandingDefinition>

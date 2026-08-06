@@ -110,3 +110,17 @@ test('verification email content includes full client branding and safe fallback
   assert.match(noLogo.html, />NL<\/p>/)
   assert.doesNotMatch(noLogo.html, /<img/)
 })
+
+test('verification emails prefer the public email logo over the app-relative logo', () => {
+  const content = buildVerificationEmail({
+    brand: resolveBrandConfig({
+      logoUrl: '/app/logo.png',
+      email: { logoUrl: 'https://assets.example.edu/email-logo.png?v=2' },
+    }),
+    verificationUrl: 'https://auth.example/verify',
+    appUrl: 'https://app.example',
+  })
+
+  assert.match(content.html, /https:\/\/assets\.example\.edu\/email-logo\.png\?v=2/)
+  assert.doesNotMatch(content.html, /https:\/\/app\.example\/app\/logo\.png/)
+})

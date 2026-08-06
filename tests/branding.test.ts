@@ -18,6 +18,10 @@ test('branding selects Aggarwal Education Center from its deployment hostname', 
   assert.equal(clientIdForHostname('PILOT.AGGARWALEDUCATIONCENTER.COM.'), 'aggarwal-education')
   assert.equal(brand.name, 'Aggarwal Education Center')
   assert.equal(brand.logoUrl, '/aggarwaleducation/Aggarwal-Education-Center-Logo.png')
+  assert.equal(
+    brand.email?.logoUrl,
+    'https://pilot.aggarwaleducationcenter.com/aggarwaleducation/Aggarwal-Education-Center-Logo.png?v=20260806',
+  )
   assert.equal(brand.primaryColor, '#055527')
   assert.equal(brand.secondaryColor, '#e9f5e9')
   assert.equal(brand.accentColor, '#055527')
@@ -89,6 +93,14 @@ test('branding trims branch-owned email sender settings', () => {
     fromAddress: 'accounts@example.edu',
     fromName: 'Example Accounts',
   })
+})
+
+test('branding normalizes an email-specific logo URL', () => {
+  const brand = resolveBrandConfig({
+    email: { logoUrl: ' https://assets.example.edu/email-logo.png?v=2 ' },
+  })
+
+  assert.equal(brand.email?.logoUrl, 'https://assets.example.edu/email-logo.png?v=2')
 })
 
 test('branding creates complete primary and accent shade variables', () => {

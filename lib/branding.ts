@@ -17,6 +17,7 @@ export type BrandConfig = {
   email?: {
     fromAddress?: string
     fromName?: string
+    logoUrl?: string
   }
 }
 
@@ -95,6 +96,7 @@ export function resolveBrandConfig(definition: BrandingDefinition): BrandConfig 
   const primaryColor = normalizeHexColor(definition.primaryColor, DEFAULT_BRAND.primaryColor)
   const fromAddress = definition.email?.fromAddress?.trim()
   const fromName = definition.email?.fromName?.trim()
+  const emailLogoUrl = normalizeLogoUrl(definition.email?.logoUrl)
   return {
     name,
     shortName: valueOrDefault(definition.shortName, name.toUpperCase()),
@@ -105,10 +107,11 @@ export function resolveBrandConfig(definition: BrandingDefinition): BrandConfig 
     accentColor: normalizeHexColor(definition.accentColor, DEFAULT_BRAND.accentColor),
     tagline: valueOrDefault(definition.tagline, DEFAULT_BRAND.tagline),
     description: valueOrDefault(definition.description, DEFAULT_BRAND.description),
-    ...(fromAddress || fromName ? {
+    ...(fromAddress || fromName || emailLogoUrl ? {
       email: {
         ...(fromAddress ? { fromAddress } : {}),
         ...(fromName ? { fromName } : {}),
+        ...(emailLogoUrl ? { logoUrl: emailLogoUrl } : {}),
       },
     } : {}),
   }
