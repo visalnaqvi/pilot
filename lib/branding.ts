@@ -1,4 +1,8 @@
-import branding, { type BrandingDefinition } from '@/config/branding'
+import {
+  brandingByClient,
+  DEFAULT_CLIENT_ID,
+  type BrandingDefinition,
+} from '@/config/branding'
 
 export type BrandConfig = {
   name: string
@@ -6,6 +10,7 @@ export type BrandConfig = {
   logoUrl?: string
   logoAlt: string
   primaryColor: string
+  secondaryColor: string
   accentColor: string
   tagline: string
   description: string
@@ -69,14 +74,25 @@ function mixHex(color: string, target: string, amount: number) {
   return `#${mixed.map(value => value.toString(16).padStart(2, '0')).join('')}`
 }
 
-export function createBrandPalette(color: string) {
-  return Object.fromEntries(Object.entries(paletteSteps).map(([shade, step]) => (
+export function createBrandPalette(color: string, secondaryColor?: string) {
+  const palette = Object.fromEntries(Object.entries(paletteSteps).map(([shade, step]) => (
     [shade, mixHex(color, step.target, step.amount)]
   ))) as Record<keyof typeof paletteSteps, string>
+
+  if (secondaryColor) {
+    palette[50] = secondaryColor
+    palette[100] = mixHex(secondaryColor, color, 0.08)
+    palette[200] = mixHex(secondaryColor, color, 0.22)
+    palette[300] = mixHex(secondaryColor, color, 0.4)
+    palette[400] = mixHex(secondaryColor, color, 0.65)
+  }
+
+  return palette
 }
 
 export function resolveBrandConfig(definition: BrandingDefinition): BrandConfig {
   const name = valueOrDefault(definition.name, DEFAULT_BRAND.name)
+  const primaryColor = normalizeHexColor(definition.primaryColor, DEFAULT_BRAND.primaryColor)
   const fromAddress = definition.email?.fromAddress?.trim()
   const fromName = definition.email?.fromName?.trim()
   return {
@@ -84,7 +100,8 @@ export function resolveBrandConfig(definition: BrandingDefinition): BrandConfig 
     shortName: valueOrDefault(definition.shortName, name.toUpperCase()),
     logoUrl: normalizeLogoUrl(definition.logoUrl),
     logoAlt: valueOrDefault(definition.logoAlt, `${name} logo`),
-    primaryColor: normalizeHexColor(definition.primaryColor, DEFAULT_BRAND.primaryColor),
+    primaryColor,
+    secondaryColor: normalizeHexColor(definition.secondaryColor, createBrandPalette(primaryColor)[50]),
     accentColor: normalizeHexColor(definition.accentColor, DEFAULT_BRAND.accentColor),
     tagline: valueOrDefault(definition.tagline, DEFAULT_BRAND.tagline),
     description: valueOrDefault(definition.description, DEFAULT_BRAND.description),
@@ -97,15 +114,65 @@ export function resolveBrandConfig(definition: BrandingDefinition): BrandConfig 
   }
 }
 
-export function getBrandConfig() {
-  return resolveBrandConfig(branding)
+export function normalizeHostname(value: string | undefined | null) {
+  const candidate = value?.trim()
+  if (!candidate) return ''
+
+  try {
+    const url = new URL(candidate.includes('://') ? candidate : `http://${candidate}`)
+    return url.hostname.toLowerCase().replace(/\.$/, '')
+  } catch {
+    return ''
+  }
+}
+
+export function clientIdForHostname(hostname: string | undefined | null) {
+  const normalizedHostname = normalizeHostname(hostname)
+  const match = Object.entries(brandingByClient).find(([, definition]) => (
+    definition.hostnames.some(candidate => normalizeHostname(candidate) === normalizedHostname)
+  ))
+  return (match?.[0] || DEFAULT_CLIENT_ID) as keyof typeof brandingByClient
+}
+
+export function isKnownClientHostname(hostname: string | undefined | null) {
+  const normalizedHostname = normalizeHostname(hostname)
+  return Object.values(brandingByClient).some(definition => (
+    definition.hostnames.some(candidate => normalizeHostname(candidate) === normalizedHostname)
+  ))
+}
+
+type BrandingEnvironment = {
+  NODE_ENV?: string
+  LOCAL_BRAND_CLIENT_ID?: string
+}
+
+export function localBrandClientId(environment: BrandingEnvironment = process.env) {
+  if (environment.NODE_ENV === 'production') return undefined
+
+  const clientId = environment.LOCAL_BRAND_CLIENT_ID?.trim().toLowerCase()
+  if (!clientId) return undefined
+  if (!Object.hasOwn(brandingByClient, clientId)) {
+    throw new Error(
+      `Unknown LOCAL_BRAND_CLIENT_ID "${environment.LOCAL_BRAND_CLIENT_ID}". Expected one of: ${Object.keys(brandingByClient).join(', ')}.`,
+    )
+  }
+  return clientId as keyof typeof brandingByClient
+}
+
+export function getBrandConfig(
+  hostname?: string | null,
+  environment: BrandingEnvironment = process.env,
+) {
+  const clientId = localBrandClientId(environment) || clientIdForHostname(hostname)
+  return resolveBrandConfig(brandingByClient[clientId])
 }
 
 export function getBrandCssVariables(brand: BrandConfig) {
-  const primary = createBrandPalette(brand.primaryColor)
+  const primary = createBrandPalette(brand.primaryColor, brand.secondaryColor)
   const accent = createBrandPalette(brand.accentColor)
   const variables: Record<`--${string}`, string> = {
     '--brand-primary': brand.primaryColor,
+    '--brand-secondary': brand.secondaryColor,
     '--brand-accent': brand.accentColor,
   }
 

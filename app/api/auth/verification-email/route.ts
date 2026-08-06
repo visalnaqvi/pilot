@@ -1,6 +1,6 @@
 import { adminAuth } from '@/lib/firebase-admin'
 import { authenticateFirebaseRequest } from '@/lib/firebase-request-auth'
-import { getBrandConfig } from '@/lib/branding'
+import { getBrandConfig, isKnownClientHostname } from '@/lib/branding'
 import { appBaseUrl } from '@/lib/app-url'
 import { sendEmail } from '@/lib/email'
 import {
@@ -50,14 +50,16 @@ export async function POST(request: Request) {
   }
 
   try {
-    const brand = getBrandConfig()
-    const appUrl = appBaseUrl()
+    const requestUrl = new URL(request.url)
+    const brand = getBrandConfig(requestUrl.hostname)
+    const appUrl = isKnownClientHostname(requestUrl.hostname) ? requestUrl.origin : appBaseUrl()
     const verificationUrl = await adminAuth.generateEmailVerificationLink(account.email, {
       url: verificationActionUrl(appUrl),
       handleCodeInApp: false,
     })
     await sendEmail({
       to: account.email,
+      brand,
       ...buildVerificationEmail({
         brand,
         recipientName: account.name,

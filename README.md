@@ -24,26 +24,38 @@ Firebase's console verification-email body is not used for application-triggered
 
 ## Per-client branding
 
-Branding is configured in `config/branding.ts`, which is committed with the branch. Checking out a client branch therefore switches its logo, identity, and palette without changing local environment variables. The primary and accent colors automatically produce the full shade scales used by buttons, links, tabs, focus states, calendars, charts, and badges.
+Branding is configured once in the shared `brandingByClient` registry in `config/branding.ts`. The app selects a client from the incoming hostname, so client branches and client-specific environment variables are not required. Unknown hostnames safely use MockPilot. The primary, secondary, and accent colors automatically produce the shade scales used by buttons, links, tabs, focus states, calendars, charts, and badges.
 
 ```ts
-const branding = {
-  name: 'Example Academy',
-  shortName: 'EXAMPLE',
-  logoUrl: '/example-academy/logo.svg',
-  logoAlt: 'Example Academy',
-  primaryColor: '#0f766e',
-  accentColor: '#ea580c',
-  tagline: 'Learn with confidence.',
-  description: 'Practice tests from Example Academy.',
-  email: {
-    fromAddress: 'accounts@example-academy.com',
-    fromName: 'Example Academy',
+export const brandingByClient = {
+  'example-academy': {
+    hostnames: ['piloy.example-academy.com'],
+    name: 'Example Academy',
+    shortName: 'EXAMPLE',
+    logoUrl: '/example-academy/logo.svg',
+    logoAlt: 'Example Academy',
+    primaryColor: '#0f766e',
+    secondaryColor: '#e9f5e9',
+    accentColor: '#ea580c',
+    tagline: 'Learn with confidence.',
+    description: 'Practice tests from Example Academy.',
+    email: {
+      fromAddress: 'accounts@example-academy.com',
+      fromName: 'Example Academy',
+    },
   },
 }
 ```
 
-For that example, store the asset at `public/example-academy/logo.svg`. Next.js serves files inside `public` from the site root, so the canonical config URL is `/example-academy/logo.svg`. The loader also normalizes `public/example-academy/logo.svg` and `/public/example-academy/logo.svg` to the correct URL. Absolute HTTP(S) URLs are supported as well.
+For that example, add `piloy.example-academy.com` to the Vercel project's Domains settings and store the asset at `public/example-academy/logo.svg`. All configured domains point to the same production deployment. Next.js serves files inside `public` from the site root, so the canonical config URL is `/example-academy/logo.svg`. The loader also normalizes `public/example-academy/logo.svg` and `/public/example-academy/logo.svg` to the correct URL. Absolute HTTP(S) URLs are supported as well.
+
+To preview a client locally, add its registry ID to `.env.local` and restart the development server:
+
+```bash
+LOCAL_BRAND_CLIENT_ID=aggarwal-education
+```
+
+Remove the value (or use `mockpilot`) to return to the default local brand. This override is ignored by production builds, where the request hostname always selects the branding.
 
 Use 3- or 6-digit hex values for the colors. If `logoUrl` is empty, the configured short name is shown as a text wordmark. All SendGrid messages prefer `email.fromAddress` and `email.fromName`; `EMAIL_FROM_ADDRESS` and `EMAIL_FROM_NAME` remain independent deployment fallbacks, with the brand name as the final sender-name fallback. Every configured sender address or domain must be verified in the active SendGrid account.
 

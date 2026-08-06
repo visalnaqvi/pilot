@@ -1,5 +1,5 @@
 import 'server-only'
-import { getBrandConfig } from './branding'
+import { getBrandConfig, type BrandConfig } from './branding'
 import { resolveEmailSender } from './email-sender'
 
 export type EmailAddress = string
@@ -9,15 +9,16 @@ export type EmailContent = {
   text: string
   html?: string
   metadata?: Record<string, string>
+  brand?: BrandConfig
 }
 
 export function isEmailConfigured() {
   return Boolean(process.env.SENDGRID_API_KEY && resolveEmailSender(getBrandConfig()).address)
 }
 
-export async function sendEmail({ to, subject, text, html, metadata }: EmailContent) {
+export async function sendEmail({ to, subject, text, html, metadata, brand }: EmailContent) {
   const apiKey = process.env.SENDGRID_API_KEY
-  const sender = resolveEmailSender(getBrandConfig())
+  const sender = resolveEmailSender(brand || getBrandConfig())
 
   if (!apiKey) {
     throw new Error('SendGrid is not configured. Set SENDGRID_API_KEY in your environment.')
