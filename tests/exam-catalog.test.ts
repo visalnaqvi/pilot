@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   cleanAliases,
+  EXAM_CATALOG_NAMING_INSTRUCTION,
   normalizeExamKey,
   prepareExamCatalogProposal,
 } from '../lib/exam-catalog'
@@ -39,18 +40,20 @@ test('AI exam suggestions expand acronyms into a catalog-ready proposal', () => 
   )
 })
 
-test('unrecognized exam searches preserve the user input', () => {
+test('descriptive exam searches use a catalog-ready name instead of the raw query', () => {
   assert.deepEqual(
-    prepareExamCatalogProposal('Custom Institute Exam', {
+    prepareExamCatalogProposal('12th standard final board exam', {
       recognized: false,
-      canonicalName: 'Ignored model guess',
-      primaryAlias: 'Ignored',
-      aliases: ['Ignored alias'],
+      canonicalName: 'Class 12 Board Examination',
+      primaryAlias: 'Class 12 Boards',
+      aliases: ['12th Board Exam'],
     }),
     {
-      name: 'Custom Institute Exam',
-      primaryAlias: 'Custom Institute Exam',
-      aliases: [],
+      name: 'Class 12 Board Examination',
+      primaryAlias: 'Class 12 Boards',
+      aliases: ['Class 12 Boards', '12th Board Exam', '12th standard final board exam'],
     },
   )
+  assert.match(EXAM_CATALOG_NAMING_INSTRUCTION, /should become "Class 12 Board Examination"/i)
+  assert.match(EXAM_CATALOG_NAMING_INSTRUCTION, /Do not merely copy or title-case/i)
 })

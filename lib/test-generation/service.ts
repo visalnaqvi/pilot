@@ -7,7 +7,10 @@ import type { Response as OpenAIResponse } from 'openai/resources/responses/resp
 import { z } from 'zod'
 import {
   categories,
+  examAliases,
+  exams,
   files,
+  organizationExams,
   questionKeys,
   questions,
   testGenerationJobs,
@@ -24,11 +27,14 @@ import { canManageOrganization } from '@/lib/services/access'
 import {
   GeneratedMcqTestSchema,
   GeneratedMcqSchema,
+  GenerationAnalysisSchema,
   GenerationConfigSchema,
+  STANDALONE_QUESTION_INSTRUCTION,
   repairGeneratedMcqContent,
   shuffleMcqOptions,
   isImageSource,
 } from '@/lib/test-generation/schema'
+import { resolveExamTopic } from '@/lib/test-generation/topic-resolution'
 
 const OPENAI_FILE_EXPIRY_SECONDS = 24 * 60 * 60
 const UNSTARTED_GENERATION_TIMEOUT_MS = 5 * 60 * 1000
@@ -83,16 +89,84 @@ export async function createGenerationJob(user: ServerUser) {
   return job.id
 }
 
+export async function createTopicGenerationJob(user: ServerUser, examId: string, requestedTopic: string) {
+  if (!user.organizationId) throw Object.assign(new Error('An organization is required.'), { status: 403 })
+  if (!(await canManageOrganization(user, user.organizationId))) {
+    throw Object.assign(new Error('Organization manager access required.'), { status: 403 })
+  }
+  const db = database()
+  const exam = (await db.select().from(exams).where(eq(exams.id, examId)).limit(1))[0]
+  if (!exam) throw Object.assign(new Error('Exam not found.'), { status: 404 })
+  const aliases = await db.select().from(examAliases).where(eq(examAliases.examId, exam.id))
+  const resolution = await resolveExamTopic(
+    exam.name,
+    aliases.map(alias => alias.alias),
+    requestedTopic,
+  )
+  if (resolution.status !== 'recognized') return { resolution }
+
+  const analysis = {
+    mode: 'topic' as const,
+    examId: exam.id,
+    examName: exam.name,
+    requestedTopic,
+    canonicalTopic: resolution.canonicalTopic,
+    language: 'English',
+    subject: resolution.subject,
+    summary: resolution.summary,
+    warnings: [
+      'This topic was identified using model knowledge, not an uploaded or current official syllabus.',
+      'Generated answers are AI-inferred and require manual review before publication.',
+    ],
+  }
+  const [job] = await db.transaction(async tx => {
+    await tx.insert(organizationExams).values({
+      organizationId: user.organizationId!,
+      examId: exam.id,
+      createdBy: user.uid,
+    }).onConflictDoNothing()
+    return tx.insert(testGenerationJobs).values({
+      organizationId: user.organizationId!,
+      createdBy: user.uid,
+      status: 'analysis_ready',
+      model: process.env.OPENAI_TEST_GENERATION_MODEL || 'gpt-5.6-terra',
+      analysis,
+    }).returning()
+  })
+  return { resolution, jobId: job.id, analysis }
+}
+
 export async function attachGenerationSources(id: string, user: ServerUser, fileIds: string[]) {
   const job = await requireGenerationJob(id, user)
   const sourceFiles = await database().select().from(files).where(inArray(files.id, fileIds))
   if (sourceFiles.length !== fileIds.length || sourceFiles.some(file => file.ownerUserId !== user.uid || file.deletedAt)) {
     throw Object.assign(new Error('One or more source files are unavailable.'), { status: 400 })
   }
+  const orderedFiles = fileIds.map(fileId => sourceFiles.find(file => file.id === fileId)!)
+  const sourceReferences = orderedFiles.map(file => ({
+    sourceId: file.id,
+    filename: file.name,
+    locator: 'Uploaded file',
+    excerpt: 'Source material used for this generated draft.',
+  }))
+  const analysis = {
+    mode: 'sources' as const,
+    sourceKind: 'notes' as const,
+    language: 'English',
+    subject: 'Study material',
+    summary: 'The uploaded material is ready for question generation.',
+    topics: [{
+      name: 'All uploaded material',
+      importance: 'high' as const,
+      rationale: 'Generate questions across the uploaded study material.',
+      sourceReferences,
+    }],
+    warnings: [] as string[],
+  }
   await database().transaction(async tx => {
     await tx.delete(testGenerationSources).where(eq(testGenerationSources.jobId, id))
     await tx.insert(testGenerationSources).values(fileIds.map((fileId, position) => ({ jobId: id, fileId, position })))
-    await tx.update(testGenerationJobs).set({ status: 'analysis_ready', updatedAt: new Date() }).where(eq(testGenerationJobs.id, job.id))
+    await tx.update(testGenerationJobs).set({ status: 'analysis_ready', analysis, updatedAt: new Date() }).where(eq(testGenerationJobs.id, job.id))
   })
 }
 
@@ -114,7 +188,7 @@ async function generatedMcqRepairDefaults(job: typeof testGenerationJobs.$inferS
     difficulty: config.success && config.data.difficulty !== 'mixed'
       ? config.data.difficulty
       : 'medium' as const,
-    sourceReferences: sourceFiles.map(file => ({
+    sourceReferences: config.success && config.data.mode === 'topic' ? [] : sourceFiles.map(file => ({
       sourceId: file.id,
       filename: file.name,
       locator: 'Uploaded file',
@@ -123,14 +197,14 @@ async function generatedMcqRepairDefaults(job: typeof testGenerationJobs.$inferS
   }
 }
 
-export async function generateFromSources(id: string, user: ServerUser, config: unknown) {
+export async function generateTestDraft(id: string, user: ServerUser, config: unknown) {
   const job = await requireGenerationJob(id, user)
   const parsedConfig = GenerationConfigSchema.parse(config)
   const canStart = job.status === 'analysis_ready'
     || (job.status === 'failed' && job.failedStage === 'generation')
   if (!canStart) {
     if (job.status === 'generating' && job.activeResponseId) return job.activeResponseId
-    throw Object.assign(new Error('Complete source analysis before generating questions.'), { status: 409 })
+    throw Object.assign(new Error('Complete the analysis step before generating questions.'), { status: 409 })
   }
 
   const db = database()
@@ -141,7 +215,24 @@ export async function generateFromSources(id: string, user: ServerUser, config: 
     .innerJoin(files, eq(files.id, testGenerationSources.fileId))
     .where(eq(testGenerationSources.jobId, id))
     .orderBy(testGenerationSources.position)
-  if (!sources.length) throw Object.assign(new Error('Upload at least one source file.'), { status: 409 })
+  if (parsedConfig.mode === 'sources' && !sources.length) {
+    throw Object.assign(new Error('Upload at least one source file.'), { status: 409 })
+  }
+  const parsedAnalysis = GenerationAnalysisSchema.safeParse(job.analysis)
+  if (parsedAnalysis.success && parsedConfig.mode !== parsedAnalysis.data.mode) {
+    throw Object.assign(new Error('The generation mode does not match this draft.'), { status: 409 })
+  }
+  if (parsedConfig.mode === 'topic' && (!parsedAnalysis.success || parsedAnalysis.data.mode !== 'topic')) {
+    throw Object.assign(new Error('This draft does not contain a validated exam and topic.'), { status: 409 })
+  }
+  if (parsedConfig.mode === 'topic' && parsedAnalysis.success && parsedAnalysis.data.mode === 'topic' && (
+    parsedConfig.examId !== parsedAnalysis.data.examId
+    || parsedConfig.examName !== parsedAnalysis.data.examName
+    || parsedConfig.requestedTopic !== parsedAnalysis.data.requestedTopic
+    || parsedConfig.canonicalTopic !== parsedAnalysis.data.canonicalTopic
+  )) {
+    throw Object.assign(new Error('The validated exam and topic cannot be changed for this draft.'), { status: 409 })
+  }
 
   const now = new Date()
   const claimed = await db.update(testGenerationJobs).set({
@@ -168,7 +259,7 @@ export async function generateFromSources(id: string, user: ServerUser, config: 
       mimeType: string
       fileId: string
     }> = []
-    for (const source of sources) {
+    for (const source of parsedConfig.mode === 'sources' ? sources : []) {
       const [buffer] = await adminStorage.bucket().file(source.file.path).download()
       const openaiFile = await client.files.create({
         file: await toFile(buffer, source.file.name, { type: source.file.contentType }),
@@ -183,6 +274,7 @@ export async function generateFromSources(id: string, user: ServerUser, config: 
       })
       await db.update(testGenerationSources).set({ openaiFileId: openaiFile.id }).where(eq(testGenerationSources.id, source.source.id))
     }
+    const sourceMode = parsedConfig.mode === 'sources'
     const response = await client.responses.create({
       model: job.model,
       background: true,
@@ -193,14 +285,23 @@ export async function generateFromSources(id: string, user: ServerUser, config: 
         test_generation_stage: 'generation',
       },
       instructions: [
-        'Create a rigorous mock test grounded only in the uploaded educational material.',
-        'Do not use web search or outside sources.',
-        'Cover only the selected topics, use the requested language and difficulty, avoid trivia and duplicate questions.',
+        sourceMode
+          ? 'Create a rigorous mock test grounded only in the uploaded educational material.'
+          : `Create a rigorous mock test for ${parsedConfig.examName} covering only ${parsedConfig.canonicalTopic}.`,
+        sourceMode
+          ? 'Do not use web search or outside sources.'
+          : 'Use only your existing model knowledge. Do not use web search, invent citations, or claim alignment with a current official syllabus.',
+        'Use the requested language and difficulty, avoid trivia and duplicate questions.',
+        sourceMode
+          ? STANDALONE_QUESTION_INSTRUCTION
+          : 'Write every question as a direct, self-contained exam question. Do not refer to source material, documents, files, diagrams, or passages that the learner cannot access.',
         `Return exactly ${parsedConfig.mcqCount} questions and make every question an MCQ.`,
         `Assign exactly ${parsedConfig.mcqMarks} marks to every question.`,
         'Each MCQ must have four distinct plausible options and exactly one correct answer.',
         'Distribute correct answers across option positions 0, 1, 2, and 3; do not place most correct answers in the same position or use a predictable pattern.',
-        'Every question must cite one or more uploaded sources using the supplied source ID and exact filename.',
+        sourceMode
+          ? 'Every question must use answerOrigin source_supported and cite one or more uploaded sources using the supplied source ID and exact filename.'
+          : 'Every question must use answerOrigin model_inferred and an empty sourceReferences array.',
         'Use stable question IDs q-001, q-002, and so on.',
       ].join(' '),
       input: [{
@@ -210,8 +311,13 @@ export async function generateFromSources(id: string, user: ServerUser, config: 
             type: 'input_text' as const,
             text: [
               `Configuration: ${JSON.stringify(parsedConfig)}`,
-              'Available source identifiers:',
-              ...uploaded.map(file => `- ${file.sourceId}: ${file.filename}`),
+              ...(sourceMode ? [
+                'Available source identifiers:',
+                ...uploaded.map(file => `- ${file.sourceId}: ${file.filename}`),
+              ] : [
+                `Validated exam: ${parsedConfig.examName}`,
+                `Validated topic: ${parsedConfig.canonicalTopic}`,
+              ]),
             ].join('\n'),
           },
           ...uploaded.map(file => isImageSource(file.mimeType)
@@ -291,8 +397,16 @@ export async function processGenerationResponse(responseId: string) {
   }
 
   try {
-    const generated = GeneratedMcqTestSchema.parse(JSON.parse(response.output_text))
     const config = GenerationConfigSchema.parse(job.config)
+    const rawGenerated = JSON.parse(response.output_text) as Record<string, unknown>
+    const generated = GeneratedMcqTestSchema.parse(config.mode === 'topic' && Array.isArray(rawGenerated.questions)
+      ? {
+          ...rawGenerated,
+          questions: rawGenerated.questions.map(question => question && typeof question === 'object' && !Array.isArray(question)
+            ? { ...question, answerOrigin: 'model_inferred' as const, sourceReferences: [] }
+            : question),
+        }
+      : rawGenerated)
     if (generated.questions.length !== config.mcqCount) {
       throw new Error(`The model returned ${generated.questions.length} questions instead of ${config.mcqCount}. Retry generation.`)
     }
@@ -323,8 +437,8 @@ export async function processGenerationResponse(responseId: string) {
         position,
         content,
         reviewStatus: 'pending',
-        verificationStatus: 'verified',
-        verification: { mode: 'source_grounded_generation' },
+        verificationStatus: config.mode === 'topic' ? 'answer_inferred' : 'verified',
+        verification: { mode: config.mode === 'topic' ? 'model_knowledge' : 'source_grounded_generation' },
       })))
     })
   } catch (error) {
@@ -416,6 +530,10 @@ export async function publishGenerationJob(id: string, user: ServerUser, input: 
     durationMinutes: z.number().int().min(1).max(1_440).default(30),
     visibility: z.enum(['public', 'private', 'assigned']).default('private'),
   }).parse(input)
+  const generationConfig = GenerationConfigSchema.parse(job.config)
+  if (generationConfig.mode === 'topic' && body.examId !== generationConfig.examId) {
+    throw Object.assign(new Error('This test must be published under the exam used for topic generation.'), { status: 409 })
+  }
   const generated = await listGeneratedQuestions(id)
   const accepted = generated.filter(item => item.reviewStatus === 'accepted')
   if (!accepted.length) throw Object.assign(new Error('Accept at least one generated question.'), { status: 409 })

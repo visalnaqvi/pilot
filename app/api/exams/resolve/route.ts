@@ -121,7 +121,7 @@ export async function POST(request: Request) {
       }
       return Response.json({
         status: 'proposed',
-        source: suggestion.recognized ? 'ai' : 'input',
+        source: 'ai',
         exam: {
           id: randomUUID(),
           name: suggestion.name,
@@ -132,10 +132,8 @@ export async function POST(request: Request) {
     } catch (error) {
       console.error('AI exam resolution failed:', error)
       return Response.json({
-        status: 'proposed',
-        source: 'input',
-        exam: { id: randomUUID(), name, primaryAlias: name, aliases: [] },
-      })
+        error: 'Unable to prepare a catalog-ready exam name. Please try again.',
+      }, { status: 503 })
     }
   } catch (error) {
     return errorResponse(error, 'Unable to resolve this exam.')

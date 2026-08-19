@@ -4,6 +4,7 @@ import OpenAI from 'openai'
 import { zodTextFormat } from 'openai/helpers/zod'
 import { z } from 'zod'
 import {
+  EXAM_CATALOG_NAMING_INSTRUCTION,
   prepareExamCatalogProposal,
   type ExamCatalogSuggestion,
 } from '@/lib/exam-catalog'
@@ -27,10 +28,11 @@ export async function suggestExamCatalogEntry(searchName: string) {
     instructions: [
       'Resolve a user-entered exam name or acronym into a clean exam catalog entry.',
       'Use your knowledge of educational, entrance, recruitment, certification, and eligibility exams.',
+      EXAM_CATALOG_NAMING_INSTRUCTION,
       'When the input is a recognized acronym such as CTET, expand it to the official full exam name and preserve the acronym as the primary alias.',
       'Use the stable exam name only. Do not invent a year, session, paper, level, region, or conducting body unless it is essential to distinguish the exam or appears in the input.',
       'Include common spelling, punctuation, abbreviation, and expanded-name variants as aliases.',
-      'Set recognized to false when the input is ambiguous or you cannot confidently identify a real exam. In that case, preserve the cleaned input as canonicalName and primaryAlias.',
+      'Set recognized to false when the input does not confidently identify a known official exam, but still provide the best catalog-ready canonical name and concise aliases.',
       'Return only the structured result.',
     ].join(' '),
     input: [{

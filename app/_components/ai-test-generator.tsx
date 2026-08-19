@@ -8,11 +8,16 @@ import {
   MAX_SOURCE_FILE_BYTES,
   MAX_SOURCE_FILES,
   MAX_SOURCE_TOTAL_BYTES,
+  GenerationAnalysisSchema,
   GenerationConfigSchema,
+  TopicResolutionSchema,
   type GeneratedQuestion,
+  type GenerationAnalysis,
+  type GenerationConfig,
   type GenerationStatus,
   type SourceAnalysis,
   type SourceUpload,
+  type TopicResolution,
 } from '@/lib/test-generation/schema'
 import { authenticatedFetch } from '@/lib/authenticated-fetch'
 import { uploadAuthorizedFile } from '@/lib/file-upload'
@@ -35,7 +40,7 @@ type JobDetail = {
   id: string
   ownerId: string
   status: GenerationStatus
-  analysis?: SourceAnalysis
+  analysis?: GenerationAnalysis
   sources?: SourceUpload[]
   titleSuggestion?: string
   descriptionSuggestion?: string
@@ -81,18 +86,22 @@ export function AiTestGenerator() {
   const [busy, setBusy] = useState('')
   const [message, setMessage] = useState('')
   const [enabled, setEnabled] = useState(true)
+  const [entryMode, setEntryMode] = useState<'topic' | 'sources'>('topic')
   const [exams, setExams] = useState<Exam[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [examId, setExamId] = useState('')
   const [categoryId, setCategoryId] = useState('')
   const [addingExam, setAddingExam] = useState(false)
   const [newExamName, setNewExamName] = useState('')
+  const [topic, setTopic] = useState('')
+  const [topicResolution, setTopicResolution] = useState<TopicResolution | null>(null)
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [duration, setDuration] = useState(30)
   const [visibility, setVisibility] = useState<'public' | 'private' | 'assigned'>('private')
   const [previewing, setPreviewing] = useState(false)
-  const [config, setConfig] = useState({
+  const [config, setConfig] = useState<GenerationConfig>({
+    mode: 'sources',
     sourceKind: 'notes' as SourceAnalysis['sourceKind'],
     subject: '',
     language: '',
@@ -140,14 +149,16 @@ export function AiTestGenerator() {
         locator: 'Uploaded file',
         excerpt: 'Source material used for this generated draft.',
       }))
-      const rawAnalysis = loaded.analysis as Partial<SourceAnalysis> | undefined
-      const analysis: SourceAnalysis = {
-        sourceKind: rawAnalysis?.sourceKind || 'notes',
-        language: rawAnalysis?.language || 'English',
-        subject: rawAnalysis?.subject || 'Study material',
-        summary: rawAnalysis?.summary || 'The uploaded material is ready for question generation.',
-        topics: rawAnalysis?.topics?.length ? rawAnalysis.topics : [{
-          name: rawAnalysis?.subject || 'All uploaded material',
+      const parsedAnalysis = GenerationAnalysisSchema.safeParse(loaded.analysis)
+      const rawSourceAnalysis = loaded.analysis as Partial<SourceAnalysis> | undefined
+      const analysis: GenerationAnalysis = parsedAnalysis.success ? parsedAnalysis.data : {
+        mode: 'sources',
+        sourceKind: rawSourceAnalysis?.sourceKind || 'notes',
+        language: rawSourceAnalysis?.language || 'English',
+        subject: rawSourceAnalysis?.subject || 'Study material',
+        summary: rawSourceAnalysis?.summary || 'The uploaded material is ready for question generation.',
+        topics: rawSourceAnalysis?.topics?.length ? rawSourceAnalysis.topics : [{
+          name: rawSourceAnalysis?.subject || 'All uploaded material',
           importance: 'high',
           rationale: 'Generate questions across the uploaded study material.',
           sourceReferences: sourceReferences.length ? sourceReferences : [{
@@ -157,7 +168,7 @@ export function AiTestGenerator() {
             excerpt: 'The uploaded source material.',
           }],
         }],
-        warnings: rawAnalysis?.warnings || [],
+        warnings: rawSourceAnalysis?.warnings || [],
       }
       const normalizedJob = { ...loaded, analysis }
       setJob(normalizedJob)
@@ -176,7 +187,9 @@ export function AiTestGenerator() {
         difficulty: ['easy', 'medium', 'hard'].includes(String(row.content.difficulty)) ? row.content.difficulty as 'easy' | 'medium' | 'hard' : 'medium',
         marks: Number(row.content.marks || 1),
         answerOrigin: row.content.answerOrigin === 'model_inferred' ? 'model_inferred' as const : 'source_supported' as const,
-        sourceReferences: Array.isArray(row.content.sourceReferences) ? row.content.sourceReferences : sourceReferences,
+        sourceReferences: Array.isArray(row.content.sourceReferences)
+          ? row.content.sourceReferences
+          : analysis.mode === 'topic' ? [] : sourceReferences,
         ...(row.content.kind === 'short_answer' ? {
           modelAnswer: String(row.content.modelAnswer || ''),
           rubric: Array.isArray(row.content.rubric) ? row.content.rubric : [{ criterion: 'Correct answer', marks: Number(row.content.marks || 1) }],
@@ -186,21 +199,55 @@ export function AiTestGenerator() {
           explanation: String(row.content.explanation || ''),
         }),
         reviewStatus: row.reviewStatus === 'accepted' ? 'approved' as const : row.reviewStatus === 'rejected' ? 'rejected' as const : 'pending' as const,
-        verificationStatus: row.verificationStatus === 'verified' ? 'supported' as const : 'pending' as const,
+        verificationStatus: row.verificationStatus === 'verified'
+          ? 'supported' as const
+          : row.verificationStatus === 'answer_inferred'
+            ? 'answer_inferred' as const
+            : row.verificationStatus === 'unsupported'
+              ? 'unsupported' as const
+              : 'pending' as const,
         verificationConfidence: row.verification?.confidence,
         verificationIssues: row.verification?.issues || [],
         suggestedFix: row.verification?.suggestedFix,
         position: row.position,
       })) as Candidate[]
       setQuestions(normalizedQuestions.sort((a, b) => a.position - b.position))
-      if (analysis) {
-        setConfig(current => ({
-          ...current,
-          sourceKind: analysis.sourceKind,
-          subject: analysis.subject,
-          language: analysis.language,
-          selectedTopics: analysis.topics.map(topic => topic.name),
-        }))
+      setConfig(current => analysis.mode === 'topic' ? {
+        mode: 'topic',
+        examId: analysis.examId,
+        examName: analysis.examName,
+        requestedTopic: analysis.requestedTopic,
+        canonicalTopic: analysis.canonicalTopic,
+        subject: analysis.subject,
+        language: analysis.language,
+        selectedTopics: [analysis.canonicalTopic],
+        difficulty: current.difficulty,
+        mcqCount: current.mcqCount,
+        shortAnswerCount: 0,
+        mcqMarks: current.mcqMarks,
+        shortAnswerMarks: current.shortAnswerMarks,
+      } : {
+        mode: 'sources',
+        sourceKind: analysis.sourceKind,
+        subject: analysis.subject,
+        language: analysis.language,
+        selectedTopics: analysis.topics.map(topic => topic.name),
+        difficulty: current.difficulty,
+        mcqCount: current.mcqCount,
+        shortAnswerCount: 0,
+        mcqMarks: current.mcqMarks,
+        shortAnswerMarks: current.shortAnswerMarks,
+      })
+      if (analysis.mode === 'topic') {
+        setEntryMode('topic')
+        setExamId(analysis.examId)
+        setTopic(analysis.canonicalTopic)
+        setExams(current => current.some(item => item.id === analysis.examId) ? current : [...current, {
+          id: analysis.examId,
+          name: analysis.examName,
+          primaryAlias: analysis.examName,
+          aliases: [],
+        }])
       }
       if (loaded.titleSuggestion) setTitle(current => current || loaded.titleSuggestion || '')
       if (loaded.descriptionSuggestion) setDescription(current => current || loaded.descriptionSuggestion || '')
@@ -263,12 +310,40 @@ export function AiTestGenerator() {
     setMessage('')
   }
 
+  async function createTopicDraft() {
+    if (!examId || !topic.trim()) return
+    setBusy('topic')
+    setMessage('')
+    setTopicResolution(null)
+    try {
+      const result = await api('/api/test-generation/jobs', {
+        method: 'POST',
+        body: JSON.stringify({ mode: 'topic', examId, topic: topic.trim() }),
+      })
+      if (result.status !== 'recognized' || typeof result.jobId !== 'string') {
+        const resolution = TopicResolutionSchema.safeParse(result)
+        if (!resolution.success) throw new Error('The topic check returned an invalid result. Please try again.')
+        setTopicResolution(resolution.data)
+        return
+      }
+      await loadJob(result.jobId)
+      await loadJobs()
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to check this exam and topic.')
+    } finally {
+      setBusy('')
+    }
+  }
+
   async function uploadAndAnalyse() {
     if (!user || !files.length) return
     setBusy('uploading')
     setMessage('')
     try {
-      const created = await api('/api/test-generation/jobs', { method: 'POST' })
+      const created = await api('/api/test-generation/jobs', {
+        method: 'POST',
+        body: JSON.stringify({ mode: 'sources' }),
+      })
       const jobId = String(created.jobId)
       const fileIds: string[] = []
       for (const file of files) {
@@ -442,6 +517,7 @@ export function AiTestGenerator() {
     setExams(current => current.some(item => item.id === exam.id) ? current : [...current, exam])
     setExamId(exam.id)
     setCategoryId('')
+    setTopicResolution(null)
     setAddingExam(false)
     setMessage(status === 'created' ? `Created and selected ${exam.name}.` : `Selected ${exam.name}.`)
   }
@@ -451,6 +527,7 @@ export function AiTestGenerator() {
     if (!exam) return
     setBusy('exam')
     setMessage('')
+    setTopicResolution(null)
     try {
       const result = await api('/api/exams/resolve', {
         method: 'POST',
@@ -465,7 +542,9 @@ export function AiTestGenerator() {
   }
 
   async function discard() {
-    if (!job || !window.confirm('Discard this draft and permanently delete its uploaded source files?')) return
+    if (!job || !window.confirm(job.analysis?.mode === 'topic'
+      ? 'Discard this exam-and-topic draft?'
+      : 'Discard this draft and its uploaded source links?')) return
     setBusy('discarding')
     try {
       await api(`/api/test-generation/jobs/${job.id}`, { method: 'DELETE' })
@@ -495,21 +574,40 @@ export function AiTestGenerator() {
 
   return <section className="mx-auto max-w-6xl">
     <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-      <div><p className="text-sm font-black uppercase tracking-[.2em] text-indigo-600">AI test generator</p><h1 className="mt-2 text-4xl font-black">Turn study material into a mock test</h1><p className="mt-3 max-w-3xl text-slate-600">Upload notes or a question paper, choose the topics and test format, then review every answer before publishing.</p></div>
+      <div><p className="text-sm font-black uppercase tracking-[.2em] text-indigo-600">AI test generator</p><h1 className="mt-2 text-4xl font-black">Build a focused mock test with AI</h1><p className="mt-3 max-w-3xl text-slate-600">Choose an exam and topic or upload study material, configure the test, then review every answer before publishing.</p></div>
       {job && job.status !== 'published' && <button type="button" disabled={Boolean(busy)} onClick={() => void discard()} className="rounded-xl border border-rose-200 px-4 py-3 text-sm font-black text-rose-700 disabled:opacity-50">Discard draft</button>}
     </div>
     {message && <p className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800">{message}</p>}
 
     {!job && <div className="mt-8 grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
       <div className="rounded-3xl border border-slate-200 bg-white p-7 shadow-sm">
-        <StageNumber number="1" title="Upload study material" />
+        <StageNumber number="1" title="Choose how to build the test" />
         {!enabled && <p className="mt-5 rounded-xl bg-rose-50 p-4 text-rose-700">AI generation is currently disabled.</p>}
-        {canCreate ? <>
+        {canCreate && <div className="mt-6 grid gap-3 sm:grid-cols-2" role="tablist" aria-label="Mock test input method">
+          <button type="button" role="tab" aria-selected={entryMode === 'topic'} onClick={() => { setEntryMode('topic'); setMessage('') }} className={`rounded-2xl border-2 p-4 text-left ${entryMode === 'topic' ? 'border-indigo-500 bg-indigo-50' : 'border-slate-200'}`}><span className="block font-black text-slate-950">Exam & topic</span><span className="mt-1 block text-sm text-slate-600">Generate from model knowledge after checking the topic.</span></button>
+          <button type="button" role="tab" aria-selected={entryMode === 'sources'} onClick={() => { setEntryMode('sources'); setMessage(''); setTopicResolution(null) }} className={`rounded-2xl border-2 p-4 text-left ${entryMode === 'sources' ? 'border-indigo-500 bg-indigo-50' : 'border-slate-200'}`}><span className="block font-black text-slate-950">Upload material</span><span className="mt-1 block text-sm text-slate-600">Ground every question in notes or a question paper.</span></button>
+        </div>}
+        {canCreate && entryMode === 'topic' ? <div className="mt-6">
+          <label className="block text-sm font-bold">Exam<span className="mt-2 block font-normal"><SearchPicker value={examId} options={exams.map(item => ({ id: item.id, label: item.name, detail: [...new Set([item.primaryAlias, ...item.aliases])].filter(alias => alias && alias !== item.name).join(', ') || undefined }))} onChange={option => void selectCatalogExam(option.id)} onCreate={query => { setNewExamName(query); setAddingExam(true) }} createLabel="Create exam" placeholder="Search or add an exam" disabled={busy === 'exam' || busy === 'topic'} /></span></label>
+          {addingExam && <div className="mt-3 rounded-xl border border-indigo-100 bg-indigo-50/50 p-4">
+            <div className="mb-3 flex items-center justify-between gap-3"><div><p className="text-sm font-bold text-slate-900">Create a new exam</p><p className="mt-1 text-xs text-slate-500">Catalog matches are checked before a new exam can be created.</p></div><button type="button" onClick={() => setAddingExam(false)} className="text-sm font-bold text-indigo-700">Cancel</button></div>
+            <ExamResolver key={newExamName} initialName={newExamName} autoFocus autoResolveInitialName onResolved={applyResolvedExam} />
+          </div>}
+          <label className="mt-5 block text-sm font-bold">Topic<input value={topic} onChange={event => { setTopic(event.target.value); setTopicResolution(null) }} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void createTopicDraft() } }} maxLength={160} placeholder={selectedExam ? `e.g. Thermodynamics for ${selectedExam.name}` : 'Select an exam first'} disabled={!selectedExam || busy === 'topic'} className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-normal disabled:bg-slate-50" /></label>
+          <p className="mt-2 text-xs text-slate-500">We will check that the topic is clear and relevant before creating a draft.</p>
+          {topicResolution && <div className={`mt-5 rounded-2xl border p-5 ${topicResolution.status === 'needs_clarification' ? 'border-amber-200 bg-amber-50' : 'border-rose-200 bg-rose-50'}`}>
+            <p className="font-black text-slate-950">{topicResolution.status === 'needs_clarification' ? 'Please clarify this topic' : 'This topic could not be identified'}</p>
+            <p className="mt-2 text-sm text-slate-700">{topicResolution.message}</p>
+            {topicResolution.suggestions.length > 0 && <div className="mt-4 flex flex-wrap gap-2">{topicResolution.suggestions.map(suggestion => <button key={suggestion} type="button" onClick={() => { setTopic(suggestion); setTopicResolution(null) }} className="rounded-lg border border-indigo-200 bg-white px-3 py-2 text-sm font-bold text-indigo-700">Use {suggestion}</button>)}</div>}
+            <button type="button" onClick={() => { setEntryMode('sources'); setTopicResolution(null) }} className="mt-4 text-sm font-bold text-indigo-700">Upload supporting material instead</button>
+          </div>}
+          <button type="button" disabled={!enabled || !selectedExam || topic.trim().length < 2 || Boolean(busy) || addingExam} onClick={() => void createTopicDraft()} className="mt-6 w-full rounded-xl bg-indigo-600 py-4 font-black text-white disabled:opacity-50">{busy === 'topic' ? 'Checking exam and topicâ€¦' : 'Check topic and continue'}</button>
+        </div> : canCreate ? <>
           <label className="mt-6 grid min-h-48 cursor-pointer place-items-center rounded-2xl border-2 border-dashed border-indigo-200 bg-indigo-50/40 p-8 text-center hover:bg-indigo-50"><span><span className="block text-lg font-black text-indigo-700">Choose up to five files</span><span className="mt-2 block text-sm text-slate-500">PDF, Word export, text, PNG, JPEG, WebP, or GIF · 20 MB each · 50 MB total</span></span><input type="file" multiple accept={accepted} onChange={chooseFiles} className="sr-only" /></label>
           {files.length > 0 && <div className="mt-5 space-y-2">{files.map(file => <div key={`${file.name}-${file.size}`} className="flex items-center justify-between rounded-xl border border-slate-200 px-4 py-3 text-sm"><span className="truncate font-semibold">{file.name}</span><span className="ml-4 shrink-0 text-slate-500">{(file.size / 1024 / 1024).toFixed(1)} MB</span></div>)}</div>}
           <button type="button" disabled={!enabled || !files.length || Boolean(busy)} onClick={() => void uploadAndAnalyse()} className="mt-6 w-full rounded-xl bg-indigo-600 py-4 font-black text-white disabled:opacity-50">{busy === 'uploading' ? 'Uploading and starting analysis…' : 'Upload and analyse'}</button>
           <p className="mt-4 text-xs text-slate-500">For OneNote pages containing diagrams or handwriting, export to PDF or use screenshots. Native .one files are not supported.</p>
-        </> : <p className="mt-6 rounded-xl bg-slate-50 p-5 text-slate-600">Administrators can review organisation drafts but cannot upload material on behalf of an organisation.</p>}
+        </> : <p className="mt-6 rounded-xl bg-slate-50 p-5 text-slate-600">Administrators can review organisation drafts but cannot create material on behalf of an organisation.</p>}
       </div>
       <DraftList jobs={jobs} open={(id) => void loadJob(id)} />
     </div>}
@@ -517,24 +615,31 @@ export function AiTestGenerator() {
     {job?.status === 'published' && <div className="mt-8 rounded-3xl border border-emerald-200 bg-white p-8 shadow-sm"><p className="text-sm font-black uppercase tracking-[.2em] text-emerald-700">Published test</p><h2 className="mt-2 text-3xl font-black">This is now a standard test</h2><p className="mt-3 max-w-2xl text-slate-600">Use the regular test editor to update its details, questions, answers, marks, and ordering.</p><div className="mt-6 flex flex-wrap gap-3">{job.publishedTestId && <Link href={`/tests/${job.publishedTestId}/edit`} className="rounded-xl bg-indigo-600 px-5 py-3 font-black text-white">Edit published test</Link>}<button type="button" onClick={() => setJob(null)} className="rounded-xl border border-slate-300 px-5 py-3 font-bold text-slate-700">Back to generator</button></div></div>}
 
     {job && job.status !== 'published' && <div className="mt-8 space-y-7">
-      <Progress status={displayedStatus || job.status} />
+      <Progress status={displayedStatus || job.status} mode={analysis?.mode || 'sources'} />
       {displayedStatus && activeStatuses.includes(displayedStatus) && <ProcessingCard status={displayedStatus} />}
       {displayedStatus === 'failed' && <div className="rounded-2xl border border-rose-200 bg-rose-50 p-6"><h2 className="text-xl font-black text-rose-900">Generation stopped</h2><p className="mt-2 text-rose-700">{job.error || 'The model did not complete this stage.'}</p><button type="button" disabled={Boolean(busy)} onClick={() => void retryFailedStage()} className="mt-4 rounded-xl bg-rose-700 px-5 py-3 font-bold text-white disabled:opacity-50">{busy === 'retrying' ? 'Retrying…' : 'Retry failed stage'}</button></div>}
 
       {displayedStatus === 'analysis_ready' && analysis && <div className="rounded-3xl border border-slate-200 bg-white p-7 shadow-sm">
         <StageNumber number="2" title="Review analysis and configure the test" />
+        {analysis.mode === 'topic' && config.mode === 'topic' ? <div className="mt-6 rounded-2xl border border-indigo-200 bg-indigo-50 p-5">
+          <p className="text-xs font-black uppercase tracking-widest text-indigo-600">Validated exam and topic</p>
+          <p className="mt-2 text-xl font-black text-slate-950">{analysis.examName}</p>
+          <p className="mt-1 font-bold text-indigo-800">{analysis.canonicalTopic}</p>
+          <p className="mt-3 text-sm leading-6 text-slate-600">{analysis.summary}</p>
+          <p className="mt-3 text-xs font-semibold text-amber-700">The exam and topic are locked for this draft. Start a new draft to change them.</p>
+        </div> : null}
         <div className="mt-6 grid gap-5 md:grid-cols-2">
-          <TextField label="Subject" value={config.subject} setValue={value => setConfig(current => ({ ...current, subject: value }))} />
+          {analysis.mode === 'sources' && config.mode === 'sources' && <TextField label="Subject" value={config.subject} setValue={value => setConfig(current => ({ ...current, subject: value }))} />}
           <TextField label="Output language" value={config.language} setValue={value => setConfig(current => ({ ...current, language: value }))} />
-          <SelectField label="Detected source type" value={config.sourceKind} setValue={value => setConfig(current => ({ ...current, sourceKind: value as typeof current.sourceKind }))} options={[['notes', 'Notes'], ['question_paper', 'Question paper'], ['mixed', 'Mixed'], ['unknown', 'Unknown']]} />
+          {analysis.mode === 'sources' && config.mode === 'sources' && <SelectField label="Detected source type" value={config.sourceKind} setValue={value => setConfig(current => current.mode === 'sources' ? ({ ...current, sourceKind: value as typeof current.sourceKind }) : current)} options={[['notes', 'Notes'], ['question_paper', 'Question paper'], ['mixed', 'Mixed'], ['unknown', 'Unknown']]} />}
           <SelectField label="Difficulty" value={config.difficulty} setValue={value => setConfig(current => ({ ...current, difficulty: value as typeof current.difficulty }))} options={[['mixed', 'Mixed'], ['easy', 'Easy'], ['medium', 'Medium'], ['hard', 'Hard']]} />
         </div>
-        <p className="mt-6 text-sm font-black text-slate-900">Selected topics</p>
+        {analysis.mode === 'sources' && config.mode === 'sources' && <><p className="mt-6 text-sm font-black text-slate-900">Selected topics</p>
         <div className="mt-3 grid gap-3 sm:grid-cols-2">{analysis.topics.map(topic => {
           const checked = config.selectedTopics.includes(topic.name)
           return <label key={topic.name} className={`rounded-xl border p-4 ${checked ? 'border-indigo-300 bg-indigo-50' : 'border-slate-200'}`}><span className="flex items-start gap-3"><input type="checkbox" checked={checked} onChange={() => setConfig(current => ({ ...current, selectedTopics: checked ? current.selectedTopics.filter(value => value !== topic.name) : [...current.selectedTopics, topic.name] }))} /><span><span className="block font-bold">{topic.name}</span><span className="mt-1 block text-xs uppercase tracking-wide text-indigo-600">{topic.importance} importance</span><span className="mt-2 block text-sm text-slate-600">{topic.rationale}</span></span></span></label>
-        })}</div>
-        {analysis.warnings.length > 0 && <div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4"><p className="font-black text-amber-900">Source warnings</p><ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-amber-800">{analysis.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul></div>}
+        })}</div></>}
+        {analysis.warnings.length > 0 && <div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4"><p className="font-black text-amber-900">{analysis.mode === 'topic' ? 'AI knowledge notice' : 'Source warnings'}</p><ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-amber-800">{analysis.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul></div>}
         <div className="mt-6 grid gap-4 sm:grid-cols-2">
           <NumberField label="MCQs" value={config.mcqCount} setValue={value => setConfig(current => ({ ...current, mcqCount: value }))} min={5} max={50} />
           <NumberField label="MCQ marks" value={config.mcqMarks} setValue={value => setConfig(current => ({ ...current, mcqMarks: value }))} min={1} max={100} />
@@ -560,7 +665,10 @@ export function AiTestGenerator() {
           <div className="mt-6 grid gap-5 md:grid-cols-2">
             <TextField label="Test title" value={title} setValue={setTitle} />
             <NumberField label="Duration in minutes (0 for no limit)" value={duration} setValue={setDuration} min={0} max={1440} />
-            <div>
+            {analysis?.mode === 'topic' ? <div>
+              <label className="block text-sm font-bold">Exam<span className="mt-2 block rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 font-normal text-slate-700">{analysis.examName}</span></label>
+              <p className="mt-2 text-xs text-slate-500">Locked to the exam used for generation.</p>
+            </div> : <div>
               <label className="block text-sm font-bold">Exam<span className="mt-2 block font-normal"><SearchPicker value={examId} options={exams.map(item => ({ id: item.id, label: item.name, detail: [...new Set([item.primaryAlias, ...item.aliases])].filter(alias => alias && alias !== item.name).join(', ') || undefined }))} onChange={option => void selectCatalogExam(option.id)} onCreate={job.status === 'review' ? query => { setNewExamName(query); setAddingExam(true) } : undefined} createLabel="Create exam" placeholder="Search the exam catalog" disabled={busy === 'exam'} /></span></label>
               {addingExam && <div className="mt-3 rounded-xl border border-indigo-100 bg-indigo-50/50 p-4">
                 <div className="mb-3 flex items-center justify-between gap-3">
@@ -569,7 +677,7 @@ export function AiTestGenerator() {
                 </div>
                 <ExamResolver key={newExamName} initialName={newExamName} autoFocus autoResolveInitialName onResolved={applyResolvedExam} />
               </div>}
-            </div>
+            </div>}
             <label className="block text-sm font-bold">Category<span className="mt-2 block font-normal"><SearchPicker value={categoryId} options={categoryOptions.map(item => ({ id: item.id, label: item.name }))} onChange={option => setCategoryId(option.id)} onCreate={job.status === 'review' ? query => void createCategory(query) : undefined} createLabel="Create category" placeholder={selectedExam ? 'Search or create a category' : 'Select an exam first'} disabled={!selectedExam || busy === 'category'} /></span></label>
             <SelectField label="Visibility" value={visibility} setValue={value => setVisibility(value as typeof visibility)} options={[['private', 'Organisation members'], ['assigned', 'Assigned students'], ['public', 'Public']]} />
           </div>
@@ -589,10 +697,13 @@ function StageNumber({ number, title }: { number: string; title: string }) {
   return <div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-full bg-indigo-600 font-black text-white">{number}</span><h2 className="text-2xl font-black">{title}</h2></div>
 }
 
-function Progress({ status }: { status: GenerationStatus }) {
-  const stages = ['Upload', 'Analyse', 'Configure', 'Generate & verify', 'Review', 'Publish']
-  const active = status === 'uploading' ? 0 : status === 'analyzing' ? 1 : status === 'analysis_ready' ? 2 : ['generating', 'verification_starting', 'verifying'].includes(status) ? 3 : status === 'review' ? 4 : status === 'published' ? 5 : 0
-  return <ol className="grid gap-2 rounded-2xl border border-slate-200 bg-white p-4 sm:grid-cols-6">{stages.map((stage, index) => <li key={stage} className={`rounded-xl px-3 py-3 text-center text-xs font-black ${index <= active ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500'}`}>{stage}</li>)}</ol>
+function Progress({ status, mode }: { status: GenerationStatus; mode: GenerationAnalysis['mode'] }) {
+  const topicMode = mode === 'topic'
+  const stages = topicMode ? ['Topic check', 'Configure', 'Generate', 'Review', 'Publish'] : ['Upload', 'Analyse', 'Configure', 'Generate & verify', 'Review', 'Publish']
+  const active = topicMode
+    ? status === 'analysis_ready' ? 1 : ['generating', 'verification_starting', 'verifying'].includes(status) ? 2 : status === 'review' ? 3 : status === 'published' ? 4 : 0
+    : status === 'uploading' ? 0 : status === 'analyzing' ? 1 : status === 'analysis_ready' ? 2 : ['generating', 'verification_starting', 'verifying'].includes(status) ? 3 : status === 'review' ? 4 : status === 'published' ? 5 : 0
+  return <ol className={`grid gap-2 rounded-2xl border border-slate-200 bg-white p-4 ${topicMode ? 'sm:grid-cols-5' : 'sm:grid-cols-6'}`}>{stages.map((stage, index) => <li key={stage} className={`rounded-xl px-3 py-3 text-center text-xs font-black ${index <= active ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500'}`}>{stage}</li>)}</ol>
 }
 
 function ProcessingCard({ status }: { status: GenerationStatus }) {

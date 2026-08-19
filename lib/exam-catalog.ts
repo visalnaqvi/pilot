@@ -20,6 +20,13 @@ export type ExamCatalogSuggestion = {
   aliases: string[]
 }
 
+export const EXAM_CATALOG_NAMING_INSTRUCTION = [
+  'Always return a concise, catalog-ready canonical exam name, including when the search is generic, descriptive, ambiguous, or not a recognized official exam.',
+  'Convert informal school terminology into a conventional exam title while preserving essential details such as class or grade, board, level, and exam type.',
+  'Do not merely copy or title-case the user search as the canonical name.',
+  'For example, a search such as "12th standard final board exam" should become "Class 12 Board Examination" unless the input identifies a more specific board or region.',
+].join(' ')
+
 export function normalizeExamKey(value: string) {
   return value
     .normalize('NFKD')
@@ -55,12 +62,8 @@ export function cleanAliases(name: string, aliases: unknown) {
     .slice(0, 12)
 }
 
-export function prepareExamCatalogProposal(searchName: string, suggestion?: ExamCatalogSuggestion) {
+export function prepareExamCatalogProposal(searchName: string, suggestion: ExamCatalogSuggestion) {
   const searched = searchName.trim()
-  if (!suggestion?.recognized) {
-    return { name: searched, primaryAlias: searched, aliases: [] }
-  }
-
   const name = suggestion.canonicalName.trim() || searched
   const aliases = cleanAliases(name, [
     suggestion.primaryAlias,

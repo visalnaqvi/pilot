@@ -36,6 +36,7 @@ export const SourceReferenceSchema = z.object({
 export type SourceReference = z.infer<typeof SourceReferenceSchema>
 
 export const SourceAnalysisSchema = z.object({
+  mode: z.literal('sources').default('sources'),
   sourceKind: z.enum(['notes', 'question_paper', 'mixed', 'unknown']),
   language: z.string().min(1).max(80),
   subject: z.string().min(1).max(160),
@@ -51,8 +52,55 @@ export const SourceAnalysisSchema = z.object({
 
 export type SourceAnalysis = z.infer<typeof SourceAnalysisSchema>
 
-export const GenerationConfigSchema = z.object({
-  sourceKind: z.enum(['notes', 'question_paper', 'mixed', 'unknown']),
+export const TopicAnalysisSchema = z.object({
+  mode: z.literal('topic'),
+  examId: z.string().uuid(),
+  examName: z.string().trim().min(2).max(120),
+  requestedTopic: z.string().trim().min(2).max(160),
+  canonicalTopic: z.string().trim().min(2).max(160),
+  language: z.string().trim().min(1).max(80),
+  subject: z.string().trim().min(1).max(160),
+  summary: z.string().trim().min(1).max(1600),
+  warnings: z.array(z.string().trim().min(1).max(500)).max(20),
+})
+
+export const GenerationAnalysisSchema = z.preprocess(value => {
+  if (value && typeof value === 'object' && !Array.isArray(value) && !('mode' in value)) {
+    return { ...value, mode: 'sources' }
+  }
+  return value
+}, z.discriminatedUnion('mode', [SourceAnalysisSchema, TopicAnalysisSchema]))
+
+export type TopicAnalysis = z.infer<typeof TopicAnalysisSchema>
+export type GenerationAnalysis = z.infer<typeof GenerationAnalysisSchema>
+
+export const TopicResolutionSchema = z.object({
+  status: z.enum(['recognized', 'needs_clarification', 'unsupported']),
+  canonicalTopic: z.string().trim().max(160),
+  subject: z.string().trim().max(160),
+  summary: z.string().trim().min(1).max(1600),
+  message: z.string().trim().min(1).max(800),
+  suggestions: z.array(z.string().trim().min(2).max(160)).max(5),
+}).superRefine((value, context) => {
+  if (value.status === 'recognized' && (!value.canonicalTopic || !value.subject)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['canonicalTopic'],
+      message: 'A recognized topic requires a canonical topic and subject.',
+    })
+  }
+  if (value.status === 'needs_clarification' && !value.suggestions.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['suggestions'],
+      message: 'Clarification requires at least one suggested topic.',
+    })
+  }
+})
+
+export type TopicResolution = z.infer<typeof TopicResolutionSchema>
+
+const generationFormatShape = {
   subject: z.string().trim().min(1).max(160),
   language: z.string().trim().min(1).max(80),
   selectedTopics: z.array(z.string().trim().min(1).max(160)).min(1).max(30),
@@ -61,7 +109,27 @@ export const GenerationConfigSchema = z.object({
   shortAnswerCount: z.number().int().min(0).max(MAX_GENERATED_QUESTIONS),
   mcqMarks: z.number().int().min(1).max(100),
   shortAnswerMarks: z.number().int().min(1).max(100),
-}).superRefine((value, context) => {
+} as const
+
+export const SourceGenerationConfigSchema = z.object({
+  mode: z.literal('sources'),
+  sourceKind: z.enum(['notes', 'question_paper', 'mixed', 'unknown']),
+  ...generationFormatShape,
+})
+
+export const TopicGenerationConfigSchema = z.object({
+  mode: z.literal('topic'),
+  examId: z.string().uuid(),
+  examName: z.string().trim().min(2).max(120),
+  requestedTopic: z.string().trim().min(2).max(160),
+  canonicalTopic: z.string().trim().min(2).max(160),
+  ...generationFormatShape,
+})
+
+const GenerationConfigUnionSchema = z.discriminatedUnion('mode', [
+  SourceGenerationConfigSchema,
+  TopicGenerationConfigSchema,
+]).superRefine((value, context) => {
   if (value.shortAnswerCount !== 0) {
     context.addIssue({
       code: 'custom',
@@ -77,26 +145,74 @@ export const GenerationConfigSchema = z.object({
       message: `Generate between ${MIN_GENERATED_QUESTIONS} and ${MAX_GENERATED_QUESTIONS} questions.`,
     })
   }
+  if (value.mode === 'topic'
+    && (value.selectedTopics.length !== 1 || value.selectedTopics[0] !== value.canonicalTopic)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['selectedTopics'],
+      message: 'Topic generation must use the validated canonical topic.',
+    })
+  }
 })
+
+export const GenerationConfigSchema = z.preprocess(value => {
+  if (value && typeof value === 'object' && !Array.isArray(value) && !('mode' in value)) {
+    return { ...value, mode: 'sources' }
+  }
+  return value
+}, GenerationConfigUnionSchema)
 
 export type GenerationConfig = z.infer<typeof GenerationConfigSchema>
 
+const SOURCE_DEPENDENT_PROMPT_PATTERNS = [
+  /\baccording to\s+(?:the|this|that|a|an|given|provided|uploaded)\s+(?:source\s+|study\s+)?(?:material|passage|text|document|notes?|file|content)\b/i,
+  /\b(?:in|from|within|based (?:on|upon))\s+(?:the|this|that|a|an|given|provided|uploaded)\s+(?:source\s+|study\s+)?(?:material|passage|text|document|notes?|file|content)\b/i,
+  /\b(?:as\s+)?(?:stated|described|explained|mentioned|discussed|shown|outlined|defined)\s+(?:in|by)\s+(?:the|this|that|given|provided|uploaded)\s+(?:source\s+|study\s+)?(?:material|passage|text|document|notes?|file|content)\b/i,
+  /\b(?:the|this|that|given|provided|uploaded|above|following)\s+(?:source\s+|study\s+)?(?:material|passage|text|document|notes?|file|content|diagram|figure|table|image)(?:['’]s)?\b/i,
+] as const
+
+export const STANDALONE_QUESTION_INSTRUCTION = [
+  'Write every question as a direct, self-contained exam question for a learner who cannot see or identify the uploaded sources.',
+  'Use the sources only as the factual basis: never refer to the material, passage, text, document, notes, file, diagram, or source in a question or option, and never use phrases such as "according to the material" or "as explained in the text".',
+  'Ask about the underlying fact or concept directly and include any question-specific context needed to answer in the question itself.',
+  'Keep source citations only in sourceReferences metadata; never expose filenames or source provenance in learner-facing question text or options.',
+].join(' ')
+
+export function isStandaloneQuestionPrompt(prompt: string) {
+  return !SOURCE_DEPENDENT_PROMPT_PATTERNS.some(pattern => pattern.test(prompt))
+}
+
 const GeneratedQuestionBaseSchema = z.object({
   id: z.string().min(1).max(128),
-  prompt: z.string().min(1).max(8000),
+  prompt: z.string().min(1).max(8000).refine(isStandaloneQuestionPrompt, {
+    message: 'Question must be self-contained and must not refer to source material the learner cannot access.',
+  }),
   topic: z.string().min(1).max(160),
   difficulty: z.enum(['easy', 'medium', 'hard']),
   marks: z.number().int().min(1).max(100),
   answerOrigin: z.enum(['source_supported', 'model_inferred']),
-  sourceReferences: z.array(SourceReferenceSchema).min(1).max(8),
+  sourceReferences: z.array(SourceReferenceSchema).max(8),
 })
+
+function validateQuestionProvenance(
+  value: { answerOrigin: 'source_supported' | 'model_inferred'; sourceReferences: SourceReference[] },
+  context: z.RefinementCtx,
+) {
+  if (value.answerOrigin === 'source_supported' && !value.sourceReferences.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['sourceReferences'],
+      message: 'Source-supported answers require at least one source reference.',
+    })
+  }
+}
 
 export const GeneratedMcqSchema = GeneratedQuestionBaseSchema.extend({
   kind: z.literal('mcq'),
   options: z.array(z.string().min(1).max(2000)).length(4),
   correctAnswer: z.number().int().min(0).max(3),
   explanation: z.string().min(1).max(4000),
-})
+}).superRefine(validateQuestionProvenance)
 
 export function shuffleMcqOptions<T extends { options: string[]; correctAnswer: number }>(
   content: T,
@@ -151,6 +267,7 @@ export const GeneratedShortAnswerSchema = GeneratedQuestionBaseSchema.extend({
   modelAnswer: z.string().min(1).max(8000),
   rubric: z.array(RubricCriterionSchema).min(1).max(12),
 }).superRefine((value, context) => {
+  validateQuestionProvenance(value, context)
   const rubricMarks = value.rubric.reduce((sum, item) => sum + item.marks, 0)
   if (rubricMarks !== value.marks) {
     context.addIssue({

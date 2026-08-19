@@ -4,10 +4,13 @@ import {
   GeneratedQuestionSchema,
   GeneratedMcqTestSchema,
   GeneratedTestSchema,
+  GenerationAnalysisSchema,
   GenerationConfigSchema,
   MAX_SOURCE_FILE_BYTES,
+  STANDALONE_QUESTION_INSTRUCTION,
   SourceBundleSchema,
   SourceReferenceSchema,
+  TopicResolutionSchema,
   VerificationSchema,
   canTransitionGeneration,
   repairGeneratedMcqContent,
@@ -89,6 +92,66 @@ test('generation configuration requires 5 to 50 total questions', () => {
   assert.equal(GenerationConfigSchema.safeParse({ ...base, mcqCount: 50, shortAnswerCount: 1 }).success, false)
 })
 
+test('generation configuration supports validated topic drafts and legacy source drafts', () => {
+  const format = {
+    subject: 'Physics',
+    language: 'English',
+    selectedTopics: ['Thermodynamics'],
+    difficulty: 'mixed' as const,
+    mcqCount: 20,
+    shortAnswerCount: 0,
+    mcqMarks: 1,
+    shortAnswerMarks: 1,
+  }
+  const legacy = GenerationConfigSchema.parse({ ...format, sourceKind: 'notes' })
+  assert.equal(legacy.mode, 'sources')
+  assert.equal(GenerationConfigSchema.safeParse({
+    ...format,
+    mode: 'topic',
+    examId: '3c3b67e1-3044-44d2-b178-da32893c012a',
+    examName: 'Joint Entrance Examination Main',
+    requestedTopic: 'thermo',
+    canonicalTopic: 'Thermodynamics',
+  }).success, true)
+  assert.equal(GenerationConfigSchema.safeParse({
+    ...format,
+    selectedTopics: ['Mechanics'],
+    mode: 'topic',
+    examId: '3c3b67e1-3044-44d2-b178-da32893c012a',
+    examName: 'Joint Entrance Examination Main',
+    requestedTopic: 'thermo',
+    canonicalTopic: 'Thermodynamics',
+  }).success, false)
+})
+
+test('analysis and topic-resolution schemas normalize legacy drafts and block unclear topics', () => {
+  const analysis = GenerationAnalysisSchema.parse({
+    sourceKind: 'notes',
+    language: 'English',
+    subject: 'Biology',
+    summary: 'Uploaded notes.',
+    topics: [{ name: 'Cells', importance: 'high', rationale: 'Core topic.', sourceReferences: [reference] }],
+    warnings: [],
+  })
+  assert.equal(analysis.mode, 'sources')
+  assert.equal(TopicResolutionSchema.safeParse({
+    status: 'needs_clarification',
+    canonicalTopic: '',
+    subject: '',
+    summary: 'The wording has multiple meanings.',
+    message: 'Choose a more specific topic.',
+    suggestions: ['Chemical thermodynamics', 'Statistical thermodynamics'],
+  }).success, true)
+  assert.equal(TopicResolutionSchema.safeParse({
+    status: 'needs_clarification',
+    canonicalTopic: '',
+    subject: '',
+    summary: 'The wording is unclear.',
+    message: 'Clarify the topic.',
+    suggestions: [],
+  }).success, false)
+})
+
 test('generated MCQs have four distinct options and valid inference labels', () => {
   assert.equal(GeneratedQuestionSchema.safeParse(mcq('q1')).success, true)
   assert.equal(GeneratedQuestionSchema.safeParse({ ...mcq('q1'), options: ['A', 'A', 'B', 'C'] }).success, true)
@@ -99,6 +162,38 @@ test('generated MCQs have four distinct options and valid inference labels', () 
     descriptionSuggestion: '',
     questions: [mcq('q1'), { ...mcq('q2'), options: ['A', 'A', 'B', 'C'] }, mcq('q3'), mcq('q4'), mcq('q5')],
   }).success, false)
+})
+
+test('model-inferred questions may omit citations but source-supported questions may not', () => {
+  assert.equal(GeneratedQuestionSchema.safeParse({
+    ...mcq('q1'),
+    answerOrigin: 'model_inferred',
+    sourceReferences: [],
+  }).success, true)
+  assert.equal(GeneratedQuestionSchema.safeParse({
+    ...mcq('q1'),
+    answerOrigin: 'source_supported',
+    sourceReferences: [],
+  }).success, false)
+})
+
+test('generated questions are direct and do not depend on inaccessible source material', () => {
+  const sourceDependentPrompts = [
+    "What is the key reason sunlight travels through a longer atmospheric path at sunrise and sunset, according to the material's explanation of the resulting colours?",
+    'Which organelle releases usable energy, as explained in the text?',
+    'What conclusion can be drawn from the uploaded document?',
+    'Which process is shown in the diagram?',
+  ]
+
+  for (const prompt of sourceDependentPrompts) {
+    assert.equal(GeneratedQuestionSchema.safeParse({ ...mcq('q1'), prompt }).success, false)
+  }
+  assert.equal(GeneratedQuestionSchema.safeParse({
+    ...mcq('q1'),
+    prompt: 'Why does sunlight pass through more of Earth\'s atmosphere at sunrise and sunset than at noon?',
+  }).success, true)
+  assert.match(STANDALONE_QUESTION_INSTRUCTION, /learner who cannot see or identify the uploaded sources/i)
+  assert.match(STANDALONE_QUESTION_INSTRUCTION, /sourceReferences metadata/i)
 })
 
 test('MCQ option shuffling preserves the answer and can place it in any option slot', () => {

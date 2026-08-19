@@ -75,7 +75,7 @@ The first Firebase account matching `BOOTSTRAP_ADMIN_EMAIL` becomes the administ
 
 ## AI test generation
 
-Configure `OPENAI_API_KEY`, `OPENAI_EXAM_RESOLUTION_MODEL`, `OPENAI_TEST_GENERATION_MODEL`, `OPENAI_WEBHOOK_SECRET`, and `AI_TEST_GENERATION_ENABLED`. The OpenAI webhook endpoint is `/api/openai/webhooks`.
+Configure `OPENAI_API_KEY`, `OPENAI_EXAM_RESOLUTION_MODEL`, optional `OPENAI_TOPIC_RESOLUTION_MODEL`, `OPENAI_TEST_GENERATION_MODEL`, `OPENAI_WEBHOOK_SECRET`, and `AI_TEST_GENERATION_ENABLED`. The OpenAI webhook endpoint is `/api/openai/webhooks`.
 
 Browser uploads use short-lived signed Google Cloud Storage URLs. Apply the
 bucket CORS configuration once for each Firebase Storage bucket:
