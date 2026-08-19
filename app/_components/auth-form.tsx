@@ -20,8 +20,9 @@ import {
   requestVerificationEmail,
   VerificationEmailDeliveryError,
 } from '@/lib/verification-email-client'
+import { safeReturnTo } from '@/lib/auth-return'
 
-export function AuthForm({ mode }: { mode: 'login' | 'signup' }) {
+export function AuthForm({ mode, returnTo }: { mode: 'login' | 'signup'; returnTo?: string }) {
   const brand = useBrand()
   const { user, ready } = useAuth()
   const router = useRouter()
@@ -31,11 +32,12 @@ export function AuthForm({ mode }: { mode: 'login' | 'signup' }) {
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const submittingRef = useRef(false)
+  const destination = safeReturnTo(returnTo)
 
   useEffect(() => {
     if (!ready || !user || submittingRef.current) return
-    router.replace(user.emailVerified ? '/dashboard' : '/verify-email')
-  }, [ready, router, user])
+    router.replace(user.emailVerified ? destination : '/verify-email')
+  }, [destination, ready, router, user])
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -85,7 +87,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'signup' }) {
 
     try {
       const credential = await signInWithEmailAndPassword(auth, email, password)
-      router.replace(credential.user.emailVerified ? '/dashboard' : '/verify-email')
+      router.replace(credential.user.emailVerified ? destination : '/verify-email')
     } catch (reason) {
       setError(verificationErrorMessage(
         reason,

@@ -21,7 +21,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!ready) return
-    if (!user) router.replace('/login')
+    if (!user) {
+      const returnTo = `${window.location.pathname}${window.location.search}`
+      router.replace(`/login?returnTo=${encodeURIComponent(returnTo)}`)
+    }
     else if (!user.emailVerified) router.replace('/verify-email')
   }, [ready, router, user])
   useEffect(() => {

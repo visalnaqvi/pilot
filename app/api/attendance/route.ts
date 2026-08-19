@@ -1,6 +1,7 @@
 import { and, desc, eq, gte, inArray, lte } from 'drizzle-orm'
 import {
   attendanceMarks,
+  attendanceQrCheckIns,
   attendanceSessions,
   organizationMemberships,
   organizations,
@@ -152,6 +153,13 @@ export async function GET(request: Request) {
     const visibleMarks = mode === 'student'
       ? marks.filter(mark => mark.userId === auth.user.uid)
       : marks
+    const qrCheckIns = sessionIds.length
+      ? await db.select().from(attendanceQrCheckIns).where(inArray(attendanceQrCheckIns.sessionId, sessionIds))
+      : []
+    const qrCheckedInAt = new Map(qrCheckIns.map(item => [
+      `${item.sessionId}:${item.userId}`,
+      item.checkedInAt.toISOString(),
+    ]))
 
     const entryIds = [...new Set(sessions.map(item => item.timetableEntryId))]
     const entries = entryIds.length
@@ -195,7 +203,10 @@ export async function GET(request: Request) {
         teacher: entry?.teacherLabel || undefined,
         timeZone: version?.timeZone || 'Asia/Kolkata',
         rosterUserIds: ownMarks.map(mark => mark.userId),
-        roster: ownMarks,
+        roster: ownMarks.map(mark => ({
+          ...mark,
+          qrCheckedInAt: qrCheckedInAt.get(`${session.id}:${mark.userId}`) || null,
+        })),
         presentCount: ownMarks.filter(mark => mark.mark === 'present').length,
         absentCount: ownMarks.filter(mark => mark.mark === 'absent').length,
         createdAt: session.createdAt.toISOString(),

@@ -30,6 +30,8 @@ test('initial migration contains the relational feature tables', () => {
     'submission_organization_access',
     'timetable_versions',
     'attendance_sessions',
+    'attendance_qr_windows',
+    'attendance_qr_check_ins',
     'notifications',
     'email_jobs',
     'email_verification_cooldowns',
@@ -44,6 +46,8 @@ test('migration enforces key uniqueness and foreign-key relationships', () => {
   assert.match(migration, /test_questions_question_unique/)
   assert.match(migration, /test_submissions_assignment_attempt_unique/)
   assert.match(migration, /attendance_sessions_occurrence_unique/)
+  assert.match(migration, /attendance_qr_windows_one_unclosed_unique/)
+  assert.match(migration, /attendance_qr_check_ins_session_user_unique/)
   assert.match(migration, /FOREIGN KEY/)
 })
 

@@ -1,5 +1,4 @@
 import { eq, inArray } from 'drizzle-orm'
-import { z } from 'zod'
 import {
   organizationGroupMembers,
   timetableVersionGroups,
@@ -11,27 +10,7 @@ import { authenticateRequest, errorResponse } from '@/lib/admin-api'
 import { database } from '@/lib/db'
 import { canAdministerOrganization } from '@/lib/services/access'
 import { saveTimetable, serializeTimetables } from '@/lib/services/timetables'
-
-const payloadSchema = z.object({
-  organizationId: z.string().uuid(),
-  name: z.string().trim().min(1).max(240),
-  effectiveFrom: z.string().date(),
-  effectiveTo: z.string().date(),
-  timeZone: z.string().min(1).max(100).default('Asia/Kolkata'),
-  selectedUserIds: z.array(z.string().min(1)).max(1_000).default([]),
-  selectedGroupIds: z.array(z.string().uuid()).max(100).default([]),
-  entries: z.array(z.object({
-    subject: z.string().trim().min(1).max(240),
-    weekdays: z.array(z.number().int().min(0).max(6)).min(1),
-    startTime: z.string().regex(/^\d{2}:\d{2}/),
-    endTime: z.string().regex(/^\d{2}:\d{2}/),
-    teacherUserId: z.string().nullable().optional(),
-    teacher: z.string().max(160).optional(),
-    location: z.string().max(240).optional(),
-    meetingUrl: z.string().max(500).optional(),
-    notes: z.string().max(5_000).optional(),
-  })).min(1).max(500),
-})
+import { createTimetablePayloadSchema } from '@/lib/timetable-api-schema'
 
 export async function GET(request: Request) {
   const auth = await authenticateRequest(request)
@@ -71,7 +50,7 @@ export async function POST(request: Request) {
   const auth = await authenticateRequest(request)
   if ('error' in auth) return auth.error
   try {
-    const parsed = payloadSchema.safeParse(await request.json())
+    const parsed = createTimetablePayloadSchema.safeParse(await request.json())
     if (!parsed.success) return Response.json({ error: 'Invalid timetable.', issues: parsed.error.issues }, { status: 400 })
     if (!(await canAdministerOrganization(auth.user, parsed.data.organizationId))) return Response.json({ error: 'Organization owner access required.' }, { status: 403 })
     const result = await saveTimetable(parsed.data, parsed.data.organizationId, auth.user.uid)

@@ -13,6 +13,7 @@ import {
   uuid,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core'
+import { sql } from 'drizzle-orm'
 import { organizationGroups, organizations, users } from './identity'
 
 export const timetableStatus = pgEnum('timetable_status', ['active', 'archived'])
@@ -127,4 +128,31 @@ export const attendanceRevisions = pgTable('attendance_revisions', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, table => [
   uniqueIndex('attendance_revisions_revision_unique').on(table.sessionId, table.revision),
+])
+
+export const attendanceQrWindows = pgTable('attendance_qr_windows', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  sessionId: uuid('session_id').notNull().references(() => attendanceSessions.id, { onDelete: 'cascade' }),
+  openedBy: text('opened_by').notNull().references(() => users.id, { onDelete: 'restrict' }),
+  openedAt: timestamp('opened_at', { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  closedBy: text('closed_by').references(() => users.id, { onDelete: 'restrict' }),
+  closedAt: timestamp('closed_at', { withTimezone: true }),
+}, table => [
+  uniqueIndex('attendance_qr_windows_one_unclosed_unique')
+    .on(table.sessionId)
+    .where(sql`${table.closedAt} is null`),
+  index('attendance_qr_windows_session_expiry_idx').on(table.sessionId, table.expiresAt),
+])
+
+export const attendanceQrCheckIns = pgTable('attendance_qr_check_ins', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  windowId: uuid('window_id').notNull().references(() => attendanceQrWindows.id, { onDelete: 'restrict' }),
+  sessionId: uuid('session_id').notNull().references(() => attendanceSessions.id, { onDelete: 'cascade' }),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'restrict' }),
+  checkedInAt: timestamp('checked_in_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  uniqueIndex('attendance_qr_check_ins_session_user_unique').on(table.sessionId, table.userId),
+  index('attendance_qr_check_ins_window_idx').on(table.windowId),
+  index('attendance_qr_check_ins_user_idx').on(table.userId),
 ])

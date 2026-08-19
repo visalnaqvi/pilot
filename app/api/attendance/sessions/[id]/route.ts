@@ -1,8 +1,10 @@
-import { and, eq } from 'drizzle-orm'
+import { and, eq, gt, isNull } from 'drizzle-orm'
 import { after } from 'next/server'
 import { z } from 'zod'
 import {
   attendanceMarks,
+  attendanceQrCheckIns,
+  attendanceQrWindows,
   attendanceRevisions,
   attendanceSessions,
   emailJobs,
@@ -19,7 +21,7 @@ import { getBrandConfig } from '@/lib/branding'
 import { database } from '@/lib/db'
 import { isEmailConfigured } from '@/lib/email'
 import { processEmailJob } from '@/lib/email-worker'
-import { canManageOrganization } from '@/lib/services/access'
+import { canAdministerOrganization, canManageOrganization } from '@/lib/services/access'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -37,6 +39,7 @@ function queueImmediateAbsenceEmails(jobIds: string[]) {
 }
 
 const updateSchema = z.object({
+  revision: z.number().int().min(1),
   status: z.enum(['draft', 'submitted', 'cancelled']),
   cancellationReason: z.string().trim().max(2_000).nullable().optional(),
   marks: z.array(z.object({
@@ -57,6 +60,9 @@ async function load(id: string) {
     userEmail: users.email,
   }).from(attendanceMarks).innerJoin(users, eq(users.id, attendanceMarks.userId))
     .where(eq(attendanceMarks.sessionId, id))
+  const qrCheckIns = await db.select().from(attendanceQrCheckIns)
+    .where(eq(attendanceQrCheckIns.sessionId, id))
+  const qrCheckedInAtByUser = new Map(qrCheckIns.map(item => [item.userId, item.checkedInAt.toISOString()]))
   const entry = (await db.select().from(timetableEntries).where(eq(timetableEntries.id, session.timetableEntryId)).limit(1))[0]
   const version = (await db.select().from(timetableVersions).where(eq(timetableVersions.id, session.timetableVersionId)).limit(1))[0]
   const timetable = version ? (await db.select().from(timetables).where(eq(timetables.id, version.timetableId)).limit(1))[0] : null
@@ -78,7 +84,10 @@ async function load(id: string) {
     teacher: entry?.teacherLabel || undefined,
     timeZone: version?.timeZone || 'Asia/Kolkata',
     rosterUserIds: marks.map(mark => mark.userId),
-    roster: marks,
+    roster: marks.map(mark => ({
+      ...mark,
+      qrCheckedInAt: qrCheckedInAtByUser.get(mark.userId) || null,
+    })),
     presentCount,
     absentCount,
     createdAt: session.createdAt.toISOString(),
@@ -100,6 +109,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     const assignedTeacher = item.teacherUserId === auth.user.uid
     if (!ownMark && !manager && !assignedTeacher) return Response.json({ error: 'Attendance access required.' }, { status: 403 })
     const canManage = manager || assignedTeacher
+    const canManageQr = assignedTeacher || await canAdministerOrganization(auth.user, item.organizationId)
     const visibleItem = canManage ? item : {
       ...item,
       roster: item.roster.filter(mark => mark.userId === auth.user.uid),
@@ -112,6 +122,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
       session: visibleItem,
       item: visibleItem,
       canManage,
+      canManageQr,
       history: canManage ? history.map(value => ({ ...value, createdAt: value.createdAt.toISOString() })) : [],
     })
   } catch (error) {
@@ -142,7 +153,22 @@ export async function PUT(request: Request, context: { params: Promise<{ id: str
       if (!complete) return Response.json({ error: 'Mark every student exactly once before submitting attendance.' }, { status: 400 })
     }
     const queuedEmailJobIds = await database().transaction(async tx => {
-      const nextRevision = current.revision + 1
+      const [lockedSession] = await tx.select().from(attendanceSessions)
+        .where(eq(attendanceSessions.id, id))
+        .for('update')
+      if (!lockedSession || lockedSession.revision !== parsed.data.revision) {
+        throw new Error('ATTENDANCE_REVISION_CONFLICT')
+      }
+      const [activeQrWindow] = await tx.select({ id: attendanceQrWindows.id })
+        .from(attendanceQrWindows)
+        .where(and(
+          eq(attendanceQrWindows.sessionId, id),
+          isNull(attendanceQrWindows.closedAt),
+          gt(attendanceQrWindows.expiresAt, new Date()),
+        ))
+        .limit(1)
+      if (activeQrWindow) throw new Error('ATTENDANCE_QR_WINDOW_ACTIVE')
+      const nextRevision = lockedSession.revision + 1
       await tx.insert(attendanceRevisions).values({
         sessionId: id,
         revision: nextRevision,
@@ -185,6 +211,12 @@ export async function PUT(request: Request, context: { params: Promise<{ id: str
     queueImmediateAbsenceEmails(queuedEmailJobIds)
     return Response.json({ session: await load(id) })
   } catch (error) {
+    if (error instanceof Error && error.message === 'ATTENDANCE_REVISION_CONFLICT') {
+      return Response.json({ error: 'This register changed in another session. Reload it before submitting.', code: error.message }, { status: 409 })
+    }
+    if (error instanceof Error && error.message === 'ATTENDANCE_QR_WINDOW_ACTIVE') {
+      return Response.json({ error: 'Stop QR check-in before submitting attendance.', code: error.message }, { status: 409 })
+    }
     return errorResponse(error, 'Unable to update attendance.')
   }
 }

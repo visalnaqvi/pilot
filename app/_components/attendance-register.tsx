@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { AttendanceRosterEntry, AttendanceSession } from '@/lib/attendance'
 import { useAuth } from './auth-context'
 import { WorkDataLoading } from './work-data-loading'
+import { AttendanceQrPanel } from './attendance-qr-panel'
 
 type AttendanceRegisterProps = {
   sessionId?: string
@@ -27,10 +28,12 @@ export function AttendanceRegister(props: AttendanceRegisterProps) {
   const [roster, setRoster] = useState<AttendanceRosterEntry[]>([])
   const [history, setHistory] = useState<AttendanceHistoryEntry[]>([])
   const [canManage, setCanManage] = useState(false)
+  const [canManageQr, setCanManageQr] = useState(false)
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('')
+  const [qrActive, setQrActive] = useState(false)
 
   const loadSession = useCallback(async (id: string, token: string) => {
     const response = await fetch(`/api/attendance/sessions/${encodeURIComponent(id)}`, {
@@ -41,6 +44,7 @@ export function AttendanceRegister(props: AttendanceRegisterProps) {
       session?: AttendanceSession
       history?: AttendanceHistoryEntry[]
       canManage?: boolean
+      canManageQr?: boolean
       error?: string
     }
     if (!response.ok || !result.session) throw new Error(result.error || 'Unable to load this attendance register.')
@@ -51,6 +55,7 @@ export function AttendanceRegister(props: AttendanceRegisterProps) {
     })))
     setHistory(result.history || [])
     setCanManage(Boolean(result.canManage))
+    setCanManageQr(Boolean(result.canManageQr))
   }, [])
 
   const openRegister = useCallback(async () => {
@@ -125,6 +130,16 @@ export function AttendanceRegister(props: AttendanceRegisterProps) {
     setMessage('')
   }
 
+  function markRemainingAbsent() {
+    setRoster(current => current.map(student => student.status === 'unmarked' ? { ...student, status: 'absent' } : student))
+    setMessage('')
+  }
+
+  const refreshRoster = useCallback(async (sessionId: string) => {
+    if (!user) return
+    await loadSession(sessionId, await user.getIdToken())
+  }, [loadSession, user])
+
   async function submitAttendance() {
     if (!user || !session || saving) return
     if (!complete) {
@@ -141,6 +156,7 @@ export function AttendanceRegister(props: AttendanceRegisterProps) {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
+          revision: session.revision,
           status: 'submitted',
           marks: roster.map(student => ({ userId: student.userId, mark: student.status })),
           cancellationReason: null,
@@ -171,7 +187,7 @@ export function AttendanceRegister(props: AttendanceRegisterProps) {
     </section>
   }
 
-  const readonly = !canManage || session.status === 'cancelled'
+  const readonly = !canManage || session.status === 'cancelled' || qrActive
 
   return <section className="mx-auto max-w-5xl">
     <Link href="/attendance" className="text-sm font-black text-indigo-700 hover:underline">← Back to attendance</Link>
@@ -203,6 +219,13 @@ export function AttendanceRegister(props: AttendanceRegisterProps) {
       This class was cancelled{session.cancellationReason ? `: ${session.cancellationReason}` : '.'}
     </p>}
 
+    {canManageQr && session.status === 'draft' && <AttendanceQrPanel
+      sessionId={session.id}
+      rosterSize={roster.length}
+      onActiveChange={setQrActive}
+      onRosterRefresh={refreshRoster}
+    />}
+
     <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_17rem]">
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -218,7 +241,7 @@ export function AttendanceRegister(props: AttendanceRegisterProps) {
           </label>
           {!readonly && <div className="grid grid-cols-2 gap-2">
             <button type="button" onClick={() => markAll('present')} className="rounded-xl border border-emerald-300 px-3 py-3 text-sm font-black text-emerald-700 hover:bg-emerald-50">All present</button>
-            <button type="button" onClick={() => markAll('absent')} className="rounded-xl border border-rose-300 px-3 py-3 text-sm font-black text-rose-700 hover:bg-rose-50">All absent</button>
+            <button type="button" onClick={markRemainingAbsent} className="rounded-xl border border-rose-300 px-3 py-3 text-sm font-black text-rose-700 hover:bg-rose-50">Remaining absent</button>
           </div>}
         </div>
 
@@ -227,6 +250,7 @@ export function AttendanceRegister(props: AttendanceRegisterProps) {
             <div className="min-w-0">
               <p className="truncate font-black text-slate-900">{student.userName}</p>
               <p className="mt-1 truncate text-xs text-slate-500">{student.userEmail}</p>
+              {student.qrCheckedInAt && <p className="mt-1 text-xs font-bold text-emerald-600">QR check-in · {new Date(student.qrCheckedInAt).toLocaleTimeString()}</p>}
             </div>
             {readonly
               ? <StatusBadge status={student.status} />
@@ -268,7 +292,7 @@ export function AttendanceRegister(props: AttendanceRegisterProps) {
           </dl>
           {canManage && session.status !== 'cancelled' && <button
             type="button"
-            disabled={saving || !complete}
+            disabled={saving || !complete || qrActive}
             onClick={() => void submitAttendance()}
             className="mt-5 w-full rounded-xl bg-indigo-600 px-4 py-3 text-sm font-black text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
           >

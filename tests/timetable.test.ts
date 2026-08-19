@@ -10,6 +10,7 @@ import {
   type TimetableEntry,
 } from '../lib/timetable'
 import { timetableInputSchema } from '../lib/timetable-schema'
+import { createTimetablePayloadSchema, timetablePayloadSchema } from '../lib/timetable-api-schema'
 import {
   planTimetableAgendaJobs,
   timetableAgendaJobId,
@@ -61,6 +62,23 @@ test('timetable schema validates dates, audiences, URLs, and internal overlaps',
   ]
   assert.deepEqual(timetableEntryOverlaps(overlapping), [['class-a', 'class-b']])
   assert.equal(timetableInputSchema.safeParse({ ...valid, entries: overlapping }).success, false)
+})
+
+test('create and edit timetable APIs share timezone-compatible validation', () => {
+  const payload = {
+    name: 'Banking Batch A',
+    effectiveFrom: '2026-01-01',
+    effectiveTo: '2026-02-01',
+    selectedUserIds: ['student-1'],
+    selectedGroupIds: [],
+    entries: [monday],
+  }
+  assert.equal(timetablePayloadSchema.parse(payload).timeZone, 'Asia/Kolkata')
+  assert.equal(createTimetablePayloadSchema.parse({
+    ...payload,
+    organizationId: '11111111-1111-4111-8111-111111111111',
+  }).timeZone, 'Asia/Kolkata')
+  assert.equal(timetablePayloadSchema.parse({ ...payload, timeZone: 'Asia/Dubai' }).timeZone, 'Asia/Dubai')
 })
 
 test('weekly date expansion includes range endpoints and crosses year boundaries', () => {

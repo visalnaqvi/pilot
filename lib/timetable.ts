@@ -17,6 +17,7 @@ export type TimetableInput = {
   name: string
   effectiveFrom: string
   effectiveTo: string
+  timeZone?: string
   selectedUserIds: string[]
   selectedGroupIds: string[]
   entries: TimetableEntry[]

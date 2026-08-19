@@ -13,6 +13,17 @@ export type AttendanceRosterEntry = {
   userName: string
   userEmail: string
   status: AttendanceMark
+  qrCheckedInAt?: string | null
+}
+
+export type AttendanceQrWindow = {
+  id: string
+  sessionId: string
+  openedAt: string
+  expiresAt: string
+  closedAt?: string | null
+  active: boolean
+  checkInCount: number
 }
 
 export type AttendanceSession = {

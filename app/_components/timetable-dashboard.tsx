@@ -67,6 +67,7 @@ const emptyInput = (): TimetableInput => ({
   name: '',
   effectiveFrom: '',
   effectiveTo: '',
+  timeZone: 'Asia/Kolkata',
   selectedUserIds: [],
   selectedGroupIds: [],
   entries: [],
@@ -208,6 +209,7 @@ export function TimetableDashboard() {
       name: timetable.name,
       effectiveFrom: timetable.effectiveFrom,
       effectiveTo: timetable.effectiveTo,
+      timeZone: timetable.timeZone || 'Asia/Kolkata',
       selectedUserIds: [...timetable.selectedUserIds],
       selectedGroupIds: [...timetable.selectedGroupIds],
       entries: timetable.entries.map(entry => ({
@@ -230,8 +232,13 @@ export function TimetableDashboard() {
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
     })
-    const payload = await response.json().catch(() => ({})) as { error?: string; timetableId?: string; changed?: boolean }
-    if (!response.ok) throw new Error(payload.error || 'Unable to save the timetable.')
+    const payload = await response.json().catch(() => ({})) as {
+      error?: string
+      issues?: { message?: string }[]
+      timetableId?: string
+      changed?: boolean
+    }
+    if (!response.ok) throw new Error(payload.issues?.[0]?.message || payload.error || 'Unable to save the timetable.')
     return payload
   }
 
@@ -253,6 +260,7 @@ export function TimetableDashboard() {
       ...input,
       organizationId: profile?.organizationId,
       name: input.name.trim(),
+      timeZone: input.timeZone || 'Asia/Kolkata',
       entries: input.entries.map(entry => ({
         ...entry,
         subject: entry.subject.trim(),
@@ -632,7 +640,7 @@ function EntryDetails({ entry, timetable, classDate, canManageAttendance, close 
           intent: 'cancel',
         }),
       })
-      const opened = await openResponse.json().catch(() => ({})) as { session?: { id: string; status: string }; error?: string }
+      const opened = await openResponse.json().catch(() => ({})) as { session?: { id: string; status: string; revision: number }; error?: string }
       if (!openResponse.ok || !opened.session) throw new Error(opened.error || 'Unable to open this class occurrence.')
       if (opened.session.status === 'cancelled') {
         setCancelled(true)
@@ -643,6 +651,7 @@ function EntryDetails({ entry, timetable, classDate, canManageAttendance, close 
         method: 'PUT',
         headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
         body: JSON.stringify({
+          revision: opened.session.revision,
           status: 'cancelled',
           marks: [],
           cancellationReason,
