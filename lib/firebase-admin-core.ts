@@ -1,4 +1,5 @@
 import admin from 'firebase-admin'
+import { getFirestore } from 'firebase-admin/firestore'
 import { firebasePrivateKeyFromEnv } from './firebase-private-key'
 
 function adminApp() {
@@ -24,3 +25,4 @@ function adminApp() {
 
 export const adminStorageCore = admin.storage(adminApp())
 export const adminAuthCore = admin.auth(adminApp())
+export const adminFirestoreCore = getFirestore(adminApp())
